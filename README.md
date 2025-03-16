@@ -26,7 +26,7 @@ OwnVst3Host is a C++ library that provides a simplified interface for hosting VS
 ## Git clone
 
 ```bash
-git clone --recurse-submodules https://github.com/felhasznaloneved/projekted.git
+git clone --recurse-submodules https://github.com/ModernMube/OwnVST3.git
 ```
 
 ## Installation
