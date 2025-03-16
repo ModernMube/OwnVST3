@@ -13,14 +13,14 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_GENERATOR_PLATFORM x64)
 
-# Dinamikus könyvtár létrehozása
+# Create dynamic library
 option(BUILD_SHARED_LIBS "Build shared library" ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# VST3 SDK elérési útja
+# VST3 SDK path
 set(VST3_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sdk" CACHE PATH "VST3 SDK root directory")
 
-# Platform-specifikus beállítások
+# Platform-specific settings
 if(WIN32)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 elseif(APPLE)
@@ -33,7 +33,7 @@ endif()
 add_definitions(-DVST3_WRAPPER_EXPORTS)
 add_definitions(-DOWN_VST3_HOST_EXPORTS)
 
-# VST3 SDK források
+# VST3 SDK sources
 set(VST3_SDK_SOURCES
     ${VST3_SDK_ROOT}/base/source/baseiids.cpp
     ${VST3_SDK_ROOT}/base/source/fbuffer.cpp
@@ -67,7 +67,7 @@ set(VST3_SDK_SOURCES
     ${VST3_SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp
 )
 
-#Platform-specifikus források
+# Platform-specific sources
 if(WIN32)
     list(APPEND VST3_SDK_SOURCES
 #        ${VST3_SDK_ROOT}/base/source/fplatform_win32.cpp
@@ -85,33 +85,33 @@ elseif(UNIX)
     )
 endif()
 
-# VST3 SDK include mappák
+# VST3 SDK include directories
 include_directories(
     ${VST3_SDK_ROOT}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Forrás fájlok
+# Source files
 set(SOURCES 
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3_wrapper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3_test.cpp
 )
 
-# Header fájlok
+# Header files
 set(HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/ownvst3.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/ownvst3_wrapper.h
 )
 
-# Könyvtár létrehozása
+# Create library
 add_library(ownvst3 ${SOURCES} ${HEADERS} ${VST3_SDK_SOURCES})
 
 # Create executable
 add_executable(ownvst3_test ${SOURCES} ${HEADERS} ${VST3_SDK_SOURCES})
 
-# Platform-specifikus linkek
+# Platform-specific links
 if(WIN32)
     target_link_libraries(ownvst3 PRIVATE ole32 uuid)
 elseif(APPLE)
@@ -127,7 +127,7 @@ set_target_properties(ownvst3 PROPERTIES
     PUBLIC_HEADER "${HEADERS}"
 )
 
-# Telepítési szabályok
+# Installation rules
 include(GNUInstallDirs)
 install(TARGETS ownvst3
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -23,11 +23,24 @@ OwnVst3Host is a C++ library that provides a simplified interface for hosting VS
 - VST3 SDK (Steinberg)
 - Windows, macOS, or Linux operating system
 
+## Git clone
+
+```bash
+git clone --recurse-submodules https://github.com/felhasznaloneved/projekted.git
+```
+
 ## Installation
 
 1. Include the OwnVst3Host header and source files in your project
 2. Make sure the VST3 SDK is properly set up and linked
 3. Define `OWN_VST3_HOST_EXPORTS` when building the library as a DLL
+
+## Build
+
+```bash
+cmake ..
+cmake --build .
+```
 
 ## Basic Usage
 

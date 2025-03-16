@@ -1,0 +1,2 @@
+# Ignore VST3 SDK files in this directory
+/sdk/*

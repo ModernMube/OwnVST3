@@ -1,5 +1,4 @@
 // ownvst3.cpp
-
 #include "../include/ownvst3.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
@@ -605,9 +604,9 @@ public:
     };
 
     // Vst3Plugin implementation - Add OWN_VST3_HOST_API to fix the inconsistent dll linkage warning
-    OWN_VST3_HOST_API Vst3Plugin::Vst3Plugin() : impl(new Vst3PluginImpl()) {}
+    Vst3Plugin::Vst3Plugin() : impl(new Vst3PluginImpl()) {}
 
-    OWN_VST3_HOST_API Vst3Plugin::~Vst3Plugin() {}
+    Vst3Plugin::~Vst3Plugin() {}
 
     bool Vst3Plugin::loadPlugin(const std::string& pluginPath) {
         return impl->loadPlugin(pluginPath);
