@@ -35,13 +35,21 @@ git clone --recurse-submodules https://github.com/ModernMube/OwnVST3.git
 2. Make sure the VST3 SDK is properly set up and linked
 3. Define `OWN_VST3_HOST_EXPORTS` when building the library as a DLL
 
-## Build
+## Build Windows
 
 ```bash
 mkdir build
 cd build
 cmake ..
 cmake --build .
+```
+## Build Mac and Linux
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
 ```
 
 ## Basic Usage

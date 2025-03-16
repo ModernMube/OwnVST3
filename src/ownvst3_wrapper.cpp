@@ -30,7 +30,12 @@ struct StringCache {
         }
         
         // Duplicate new string
-        cache[index] = _strdup(str.c_str());
+        #ifdef _WIN32
+            char* dupStr = _strdup(str.c_str());
+        #else
+            // UNIX, Linux, macOS system
+            char* dupStr = strdup(str.c_str());
+        #endif
         
         // Save current position and increment index
         const char* result = cache[index];

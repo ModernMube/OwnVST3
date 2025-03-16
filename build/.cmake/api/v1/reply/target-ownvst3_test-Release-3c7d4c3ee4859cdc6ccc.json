@@ -14,6 +14,7 @@
 		"commands" : 
 		[
 			"add_executable",
+			"target_link_libraries",
 			"add_definitions",
 			"include_directories"
 		],
@@ -29,31 +30,37 @@
 			{
 				"command" : 0,
 				"file" : 0,
-				"line" : 112,
+				"line" : 192,
 				"parent" : 0
 			},
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 34,
-				"parent" : 0
-			},
-			{
-				"command" : 1,
-				"file" : 0,
-				"line" : 33,
-				"parent" : 0
-			},
-			{
-				"command" : 1,
-				"file" : 0,
-				"line" : 25,
+				"line" : 207,
 				"parent" : 0
 			},
 			{
 				"command" : 2,
 				"file" : 0,
-				"line" : 89,
+				"line" : 35,
+				"parent" : 0
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 34,
+				"parent" : 0
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 25,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 160,
 				"parent" : 0
 			}
 		]
@@ -70,30 +77,30 @@
 			"defines" : 
 			[
 				{
-					"backtrace" : 2,
+					"backtrace" : 3,
 					"define" : "OWN_VST3_HOST_EXPORTS"
 				},
 				{
-					"backtrace" : 3,
+					"backtrace" : 4,
 					"define" : "VST3_WRAPPER_EXPORTS"
 				},
 				{
-					"backtrace" : 4,
+					"backtrace" : 5,
 					"define" : "_CRT_SECURE_NO_WARNINGS"
 				}
 			],
 			"includes" : 
 			[
 				{
-					"backtrace" : 5,
+					"backtrace" : 6,
 					"path" : "E:/Visualcode/OwnVST3/sdk"
 				},
 				{
-					"backtrace" : 5,
+					"backtrace" : 6,
 					"path" : "E:/Visualcode/OwnVST3"
 				},
 				{
-					"backtrace" : 5,
+					"backtrace" : 6,
 					"path" : "E:/Visualcode/OwnVST3/include"
 				}
 			],
@@ -170,6 +177,16 @@
 			{
 				"fragment" : "",
 				"role" : "flags"
+			},
+			{
+				"backtrace" : 2,
+				"fragment" : "ole32.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 2,
+				"fragment" : "uuid.lib",
+				"role" : "libraries"
 			},
 			{
 				"fragment" : "kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib",
