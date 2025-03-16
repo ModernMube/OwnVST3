@@ -17,7 +17,7 @@
 			{
 				"command" : 0,
 				"file" : 0,
-				"line" : 132,
+				"line" : 223,
 				"parent" : 0
 			}
 		]
@@ -30,7 +30,7 @@
 			"destination" : "lib",
 			"paths" : 
 			[
-				"MinSizeRel/ownvst3.lib"
+				"Release/ownvst3.lib"
 			],
 			"targetId" : "ownvst3::@6890427a1f51a3e7e1df",
 			"targetIndex" : 2,
@@ -43,7 +43,7 @@
 			"destination" : "bin",
 			"paths" : 
 			[
-				"MinSizeRel/ownvst3.dll"
+				"Release/ownvst3.dll"
 			],
 			"targetId" : "ownvst3::@6890427a1f51a3e7e1df",
 			"targetIndex" : 2,

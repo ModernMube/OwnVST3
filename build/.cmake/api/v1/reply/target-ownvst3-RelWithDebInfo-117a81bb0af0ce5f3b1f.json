@@ -2,13 +2,13 @@
 	"artifacts" : 
 	[
 		{
-			"path" : "MinSizeRel/ownvst3.dll"
+			"path" : "RelWithDebInfo/ownvst3.dll"
 		},
 		{
-			"path" : "MinSizeRel/ownvst3.lib"
+			"path" : "RelWithDebInfo/ownvst3.lib"
 		},
 		{
-			"path" : "MinSizeRel/ownvst3.pdb"
+			"path" : "RelWithDebInfo/ownvst3.pdb"
 		}
 	],
 	"backtrace" : 1,
@@ -34,19 +34,25 @@
 			{
 				"command" : 0,
 				"file" : 0,
-				"line" : 109,
+				"line" : 189,
 				"parent" : 0
 			},
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 132,
+				"line" : 223,
 				"parent" : 0
 			},
 			{
 				"command" : 2,
 				"file" : 0,
-				"line" : 116,
+				"line" : 196,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 35,
 				"parent" : 0
 			},
 			{
@@ -58,19 +64,13 @@
 			{
 				"command" : 3,
 				"file" : 0,
-				"line" : 33,
-				"parent" : 0
-			},
-			{
-				"command" : 3,
-				"file" : 0,
 				"line" : 25,
 				"parent" : 0
 			},
 			{
 				"command" : 4,
 				"file" : 0,
-				"line" : 89,
+				"line" : 160,
 				"parent" : 0
 			}
 		]
@@ -81,7 +81,7 @@
 			"compileCommandFragments" : 
 			[
 				{
-					"fragment" : "/DWIN32 /D_WINDOWS /GR /EHsc /O1 /Ob1 /DNDEBUG -std:c++14 -MD"
+					"fragment" : "/DWIN32 /D_WINDOWS /GR /EHsc /Zi /O2 /Ob1 /DNDEBUG -std:c++14 -MD"
 				}
 			],
 			"defines" : 
@@ -194,7 +194,7 @@
 		"commandFragments" : 
 		[
 			{
-				"fragment" : "/machine:X86 /INCREMENTAL:NO",
+				"fragment" : "/machine:X86 /debug /INCREMENTAL",
 				"role" : "flags"
 			},
 			{

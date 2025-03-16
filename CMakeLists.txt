@@ -26,6 +26,7 @@ if(WIN32)
 elseif(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Target macOS architectures")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")
+    add_definitions(-DRELEASE) 
 elseif(UNIX)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")
 endif()
@@ -33,39 +34,109 @@ endif()
 add_definitions(-DVST3_WRAPPER_EXPORTS)
 add_definitions(-DOWN_VST3_HOST_EXPORTS)
 
-# VST3 SDK sources
-set(VST3_SDK_SOURCES
-    ${VST3_SDK_ROOT}/base/source/baseiids.cpp
-    ${VST3_SDK_ROOT}/base/source/fbuffer.cpp
-    ${VST3_SDK_ROOT}/base/source/fdebug.cpp
-    ${VST3_SDK_ROOT}/base/source/fdynlib.cpp
-    ${VST3_SDK_ROOT}/base/source/fobject.cpp
-    ${VST3_SDK_ROOT}/base/source/fstreamer.cpp
-    ${VST3_SDK_ROOT}/base/source/fstring.cpp
-    ${VST3_SDK_ROOT}/base/source/timer.cpp
-    ${VST3_SDK_ROOT}/base/source/updatehandler.cpp
-    ${VST3_SDK_ROOT}/base/thread/source/fcondition.cpp
-    ${VST3_SDK_ROOT}/base/thread/source/flock.cpp
-    ${VST3_SDK_ROOT}/pluginterfaces/base/coreiids.cpp
-    ${VST3_SDK_ROOT}/pluginterfaces/base/funknown.cpp
-    ${VST3_SDK_ROOT}/pluginterfaces/base/ustring.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/common/commoniids.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/common/memorystream.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/common/pluginview.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_win32.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/eventlist.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp    
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/processdata.cpp
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp 
-    ${VST3_SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp
-)
+if(WIN32)
+    # VST3 SDK sources WINDOWS
+    set(VST3_SDK_SOURCES
+        ${VST3_SDK_ROOT}/base/source/baseiids.cpp
+        ${VST3_SDK_ROOT}/base/source/fbuffer.cpp
+        ${VST3_SDK_ROOT}/base/source/fdebug.cpp
+        ${VST3_SDK_ROOT}/base/source/fdynlib.cpp
+        ${VST3_SDK_ROOT}/base/source/fobject.cpp
+        ${VST3_SDK_ROOT}/base/source/fstreamer.cpp
+        ${VST3_SDK_ROOT}/base/source/fstring.cpp
+        ${VST3_SDK_ROOT}/base/source/timer.cpp
+        ${VST3_SDK_ROOT}/base/source/updatehandler.cpp
+        ${VST3_SDK_ROOT}/base/thread/source/fcondition.cpp
+        ${VST3_SDK_ROOT}/base/thread/source/flock.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/coreiids.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/funknown.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/ustring.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/commoniids.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/memorystream.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/pluginview.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_win32.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/eventlist.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp    
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/processdata.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp 
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp
+    )
+elseif(APPLE)
+    # VST3 SDK sources MAC
+    set(VST3_SDK_SOURCES
+        ${VST3_SDK_ROOT}/base/source/baseiids.cpp
+        ${VST3_SDK_ROOT}/base/source/fbuffer.cpp
+        ${VST3_SDK_ROOT}/base/source/fdebug.cpp
+        ${VST3_SDK_ROOT}/base/source/fdynlib.cpp
+        ${VST3_SDK_ROOT}/base/source/fobject.cpp
+        ${VST3_SDK_ROOT}/base/source/fstreamer.cpp
+        ${VST3_SDK_ROOT}/base/source/fstring.cpp
+        ${VST3_SDK_ROOT}/base/source/timer.cpp
+        ${VST3_SDK_ROOT}/base/source/updatehandler.cpp
+        ${VST3_SDK_ROOT}/base/thread/source/fcondition.cpp
+        ${VST3_SDK_ROOT}/base/thread/source/flock.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/coreiids.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/funknown.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/ustring.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/commoniids.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/memorystream.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/pluginview.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/eventlist.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp    
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/processdata.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp 
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp
+    )
+elseif(LINUX)
+    # VST3 SDK sources LINUX
+    set(VST3_SDK_SOURCES
+        ${VST3_SDK_ROOT}/base/source/baseiids.cpp
+        ${VST3_SDK_ROOT}/base/source/fbuffer.cpp
+        ${VST3_SDK_ROOT}/base/source/fdebug.cpp
+        ${VST3_SDK_ROOT}/base/source/fdynlib.cpp
+        ${VST3_SDK_ROOT}/base/source/fobject.cpp
+        ${VST3_SDK_ROOT}/base/source/fstreamer.cpp
+        ${VST3_SDK_ROOT}/base/source/fstring.cpp
+        ${VST3_SDK_ROOT}/base/source/timer.cpp
+        ${VST3_SDK_ROOT}/base/source/updatehandler.cpp
+        ${VST3_SDK_ROOT}/base/thread/source/fcondition.cpp
+        ${VST3_SDK_ROOT}/base/thread/source/flock.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/coreiids.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/funknown.cpp
+        ${VST3_SDK_ROOT}/pluginterfaces/base/ustring.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/commoniids.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/memorystream.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/pluginview.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_linux.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/eventlist.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp    
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/processdata.cpp
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp 
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp
+    )
+endif()
+
 
 # Platform-specific sources
 if(WIN32)
@@ -92,6 +163,15 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# Add -fobjc-arc flag for Objective-C/Objective-C++ files
+if(APPLE)
+    set_source_files_properties(
+        ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm
+        ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
+endif()
+
 # Source files
 set(SOURCES 
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3.cpp
@@ -117,9 +197,20 @@ if(WIN32)
 elseif(APPLE)
     find_library(CORE_FOUNDATION CoreFoundation)
     find_library(COCOA Cocoa)
-    target_link_libraries(vst3wrapper PRIVATE ${CORE_FOUNDATION} ${COCOA})
+    target_link_libraries(ownvst3 PRIVATE ${CORE_FOUNDATION} ${COCOA})
 elseif(UNIX)
-    target_link_libraries(vst3wrapper PRIVATE dl pthread)
+    target_link_libraries(ownvst3 PRIVATE dl pthread)
+endif()
+
+# Platform-specific links for the test executable
+if(WIN32)
+    target_link_libraries(ownvst3_test PRIVATE ole32 uuid)
+elseif(APPLE)
+    find_library(CORE_FOUNDATION CoreFoundation)
+    find_library(COCOA Cocoa)
+    target_link_libraries(ownvst3_test PRIVATE ${CORE_FOUNDATION} ${COCOA})
+elseif(UNIX)
+    target_link_libraries(ownvst3_test PRIVATE dl pthread)
 endif()
 
 # Export headers

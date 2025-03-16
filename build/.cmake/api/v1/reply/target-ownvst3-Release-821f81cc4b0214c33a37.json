@@ -2,10 +2,13 @@
 	"artifacts" : 
 	[
 		{
-			"path" : "Debug/ownvst3_test.exe"
+			"path" : "Release/ownvst3.dll"
 		},
 		{
-			"path" : "Debug/ownvst3_test.pdb"
+			"path" : "Release/ownvst3.lib"
+		},
+		{
+			"path" : "Release/ownvst3.pdb"
 		}
 	],
 	"backtrace" : 1,
@@ -13,7 +16,9 @@
 	{
 		"commands" : 
 		[
-			"add_executable",
+			"add_library",
+			"install",
+			"target_link_libraries",
 			"add_definitions",
 			"include_directories"
 		],
@@ -29,31 +34,43 @@
 			{
 				"command" : 0,
 				"file" : 0,
-				"line" : 112,
+				"line" : 189,
 				"parent" : 0
 			},
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 34,
-				"parent" : 0
-			},
-			{
-				"command" : 1,
-				"file" : 0,
-				"line" : 33,
-				"parent" : 0
-			},
-			{
-				"command" : 1,
-				"file" : 0,
-				"line" : 25,
+				"line" : 223,
 				"parent" : 0
 			},
 			{
 				"command" : 2,
 				"file" : 0,
-				"line" : 89,
+				"line" : 196,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 35,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 34,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 25,
+				"parent" : 0
+			},
+			{
+				"command" : 4,
+				"file" : 0,
+				"line" : 160,
 				"parent" : 0
 			}
 		]
@@ -64,36 +81,39 @@
 			"compileCommandFragments" : 
 			[
 				{
-					"fragment" : "/DWIN32 /D_WINDOWS /GR /EHsc /Zi /Ob0 /Od /RTC1 -std:c++14 -MDd"
+					"fragment" : "/DWIN32 /D_WINDOWS /GR /EHsc /O2 /Ob2 /DNDEBUG -std:c++14 -MD"
 				}
 			],
 			"defines" : 
 			[
 				{
-					"backtrace" : 2,
+					"backtrace" : 4,
 					"define" : "OWN_VST3_HOST_EXPORTS"
 				},
 				{
-					"backtrace" : 3,
+					"backtrace" : 5,
 					"define" : "VST3_WRAPPER_EXPORTS"
 				},
 				{
-					"backtrace" : 4,
+					"backtrace" : 6,
 					"define" : "_CRT_SECURE_NO_WARNINGS"
+				},
+				{
+					"define" : "ownvst3_EXPORTS"
 				}
 			],
 			"includes" : 
 			[
 				{
-					"backtrace" : 5,
+					"backtrace" : 7,
 					"path" : "E:/Visualcode/OwnVST3/sdk"
 				},
 				{
-					"backtrace" : 5,
+					"backtrace" : 7,
 					"path" : "E:/Visualcode/OwnVST3"
 				},
 				{
-					"backtrace" : 5,
+					"backtrace" : 7,
 					"path" : "E:/Visualcode/OwnVST3/include"
 				}
 			],
@@ -150,26 +170,42 @@
 			"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df"
 		}
 	],
-	"id" : "ownvst3_test::@6890427a1f51a3e7e1df",
+	"id" : "ownvst3::@6890427a1f51a3e7e1df",
+	"install" : 
+	{
+		"destinations" : 
+		[
+			{
+				"backtrace" : 2,
+				"path" : "lib"
+			},
+			{
+				"backtrace" : 2,
+				"path" : "bin"
+			}
+		],
+		"prefix" : 
+		{
+			"path" : "C:/Program Files (x86)/ownvst3"
+		}
+	},
 	"link" : 
 	{
 		"commandFragments" : 
 		[
 			{
-				"fragment" : "/DWIN32 /D_WINDOWS /GR /EHsc /Zi /Ob0 /Od /RTC1 -MDd",
+				"fragment" : "/machine:X86 /INCREMENTAL:NO",
 				"role" : "flags"
 			},
 			{
-				"fragment" : "/machine:X86 /debug /INCREMENTAL",
-				"role" : "flags"
+				"backtrace" : 3,
+				"fragment" : "ole32.lib",
+				"role" : "libraries"
 			},
 			{
-				"fragment" : "/subsystem:console",
-				"role" : "flags"
-			},
-			{
-				"fragment" : "",
-				"role" : "flags"
+				"backtrace" : 3,
+				"fragment" : "uuid.lib",
+				"role" : "libraries"
 			},
 			{
 				"fragment" : "kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib",
@@ -178,8 +214,8 @@
 		],
 		"language" : "CXX"
 	},
-	"name" : "ownvst3_test",
-	"nameOnDisk" : "ownvst3_test.exe",
+	"name" : "ownvst3",
+	"nameOnDisk" : "ownvst3.dll",
 	"paths" : 
 	{
 		"build" : ".",
@@ -446,5 +482,5 @@
 			"sourceGroupIndex" : 0
 		}
 	],
-	"type" : "EXECUTABLE"
+	"type" : "SHARED_LIBRARY"
 }

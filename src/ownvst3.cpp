@@ -12,7 +12,13 @@
 #include "base/source/fobject.h"
 
 #include <iostream>
-#include <windows.h>
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <locale>
+    #include <codecvt>  
+#endif
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -578,29 +584,63 @@ public:
     double sampleRate;                             // Current sample rate
     int blockSize;                                 // Current block size
 
-
+    #ifdef _WIN32
     // Converts TCHAR to UTF-8 string
     std::string tchar_to_utf8(const Steinberg::Vst::TChar* tcharStr) {
+        std::string result;
+        if (!tcharStr) return result;
+        
+        #ifdef UNICODE
+        // For Unicode, convert wchar_t
+        std::wstring wstr(reinterpret_cast<const wchar_t*>(tcharStr));
+        // Determine conversion size
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
+        // Allocate string and convert
+        if (size_needed > 0) {
+            result.resize(size_needed);
+            WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], size_needed, NULL, NULL);
+        }
+        #else
+        // For non-Unicode, copy string directly
+        result = tcharStr;
+        #endif
+        
+        return result;
+        }
+    #else        
+        // Converts TCHAR to UTF-8 string
+        std::string tchar_to_utf8(const Steinberg::Vst::TChar* tcharStr) {
             std::string result;
             if (!tcharStr) return result;
             
-            #ifdef UNICODE
+        #ifdef UNICODE
             // For Unicode, convert wchar_t
             std::wstring wstr(reinterpret_cast<const wchar_t*>(tcharStr));
-            // Determine conversion size
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
-            // Allocate string and convert
-            if (size_needed > 0) {
-                result.resize(size_needed);
-                WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], size_needed, NULL, NULL);
+            
+            // UNIX/macOS conversion using C++11 codecvt
+            try {
+                std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+                result = converter.to_bytes(wstr);
+            } catch (const std::exception& e) {
+                // Fallback in case of conversion error
+                result.clear();
+                for (size_t i = 0; i < wstr.length(); ++i) {
+                    // Simple fallback conversion (only works for ASCII subset)
+                    if (wstr[i] <= 127) {
+                        result.push_back(static_cast<char>(wstr[i]));
+                    } else {
+                        result.push_back('?'); // Replace non-ASCII with ?
+                    }
+                }
             }
-            #else
+        #else
             // For non-Unicode, copy string directly
             result = tcharStr;
-            #endif
-            
+        #endif
+
             return result;
         }
+    #endif
     };
 
     // Vst3Plugin implementation - Add OWN_VST3_HOST_API to fix the inconsistent dll linkage warning
