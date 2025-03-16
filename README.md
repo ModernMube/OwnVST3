@@ -1,4 +1,4 @@
-# OwnVst3Host
+# OwnVst3
 
 A lightweight C++ wrapper for loading and working with VST3 plugins.
 

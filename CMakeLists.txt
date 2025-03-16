@@ -11,7 +11,7 @@ project(ownvst3
 # C++14 standard
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_GENERATOR_PLATFORM x64)
+#set(CMAKE_GENERATOR_PLATFORM x64)
 
 # Create dynamic library
 option(BUILD_SHARED_LIBS "Build shared library" ON)
@@ -27,8 +27,9 @@ elseif(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Target macOS architectures")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")
     add_definitions(-DRELEASE) 
-elseif(UNIX)
+elseif(UNIX AND NOT APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")
+    add_definitions(-DRELEASE) 
 endif()
 
 add_definitions(-DVST3_WRAPPER_EXPORTS)
@@ -101,7 +102,7 @@ elseif(APPLE)
         ${VST3_SDK_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp 
         ${VST3_SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp
     )
-elseif(LINUX)
+elseif(UNIX AND NOT APPLE)
     # VST3 SDK sources LINUX
     set(VST3_SDK_SOURCES
         ${VST3_SDK_ROOT}/base/source/baseiids.cpp
@@ -149,7 +150,7 @@ elseif(APPLE)
 #       ${VST3_SDK_ROOT}/base/source/fplatform_mac.mm
         ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm
     )
-elseif(UNIX)
+elseif(UNIX AND NOT APPLE)
     list(APPEND VST3_SDK_SOURCES
 #       ${VST3_SDK_ROOT}/base/source/fplatform_linux.cpp
         ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp
@@ -198,8 +199,9 @@ elseif(APPLE)
     find_library(CORE_FOUNDATION CoreFoundation)
     find_library(COCOA Cocoa)
     target_link_libraries(ownvst3 PRIVATE ${CORE_FOUNDATION} ${COCOA})
-elseif(UNIX)
-    target_link_libraries(ownvst3 PRIVATE dl pthread)
+elseif(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ownvst3 PRIVATE dl pthread stdc++fs)
 endif()
 
 # Platform-specific links for the test executable
@@ -209,8 +211,9 @@ elseif(APPLE)
     find_library(CORE_FOUNDATION CoreFoundation)
     find_library(COCOA Cocoa)
     target_link_libraries(ownvst3_test PRIVATE ${CORE_FOUNDATION} ${COCOA})
-elseif(UNIX)
-    target_link_libraries(ownvst3_test PRIVATE dl pthread)
+elseif(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ownvst3_test PRIVATE dl pthread stdc++fs)
 endif()
 
 # Export headers
