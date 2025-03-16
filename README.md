@@ -38,6 +38,8 @@ git clone --recurse-submodules https://github.com/felhasznaloneved/projekted.git
 ## Build
 
 ```bash
+mkdir build
+cd build
 cmake ..
 cmake --build .
 ```
