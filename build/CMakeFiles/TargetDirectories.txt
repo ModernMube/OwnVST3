@@ -1,5 +1,0 @@
-E:/Visualcode/OwnVST3/build/CMakeFiles/ownvst3.dir
-E:/Visualcode/OwnVST3/build/CMakeFiles/ownvst3_test.dir
-E:/Visualcode/OwnVST3/build/CMakeFiles/INSTALL.dir
-E:/Visualcode/OwnVST3/build/CMakeFiles/ALL_BUILD.dir
-E:/Visualcode/OwnVST3/build/CMakeFiles/ZERO_CHECK.dir
