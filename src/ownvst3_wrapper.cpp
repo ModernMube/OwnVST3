@@ -37,6 +37,9 @@ struct StringCache {
             char* dupStr = strdup(str.c_str());
         #endif
         
+        // Most tároljuk el a dupStr-t a cache-ben
+        cache[index] = dupStr;
+        
         // Save current position and increment index
         const char* result = cache[index];
         index = (index + 1) % MAX_STRINGS;

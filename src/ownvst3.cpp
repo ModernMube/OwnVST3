@@ -138,51 +138,38 @@ public:
         }
     }
 
-    // Unloads the plugin and releases all resources
     void unloadPlugin() {
         try {
-            // Remove view if exists
+            // 1. Távolítsuk el a nézetet
             if (view) {
                 view->removed();
                 view = nullptr;
             }
             
-            // First store objects to local variables before nullifying
-            Steinberg::IPtr<Steinberg::Vst::IEditController> controllerToTerminate = controller;
-            Steinberg::IPtr<Steinberg::Vst::IComponent> componentToTerminate = component;
+            // 2. Deaktiválás, ha még aktív
+            if (component) {
+                try {
+                    component->setActive(false);
+                } catch (...) {}
+            }
             
-            // Nullify references immediately
+            // 3. Minden referenciát null-ra állítunk, de nem hívunk terminate-et
+            view = nullptr;
             processor = nullptr;
+            
+            // Fontos: Elengedjük a referenciákat, de nem hívunk terminate-et
             controller = nullptr;
             component = nullptr;
             factory = nullptr;
             
-            // Safe termination
-            if (componentToTerminate) {
-                try {
-                    componentToTerminate->setActive(false);
-                    componentToTerminate->terminate();
-                } catch (...) {
-                    // Suppress errors
-                }
-            }
-            
-            if (controllerToTerminate) {
-                try {
-                    controllerToTerminate->terminate();
-                } catch (...) {
-                    // Suppress errors
-                }
-            }
-            
-            // Finally release module
+            // 4. A module objektum felszabadításával a VST3 SDK kezeli a belső komponensek felszabadítását
             module = nullptr;
         }
         catch (...) {
-            // Suppress exceptions for safer shutdown
+            // Kivételek elnyomása
         }
     }
-    
+
     // Creates and attaches the plugin's editor to a window
     bool createEditor(void* windowHandle) {
         if (!controller) return false;

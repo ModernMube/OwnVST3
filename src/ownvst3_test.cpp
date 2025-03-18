@@ -8,8 +8,8 @@
 int main(int argc, char* argv[]) {
     
     // Plugin path
-    //std::string pluginPath = "C:\\Program Files\\Common Files\\VST3\\iZotope\\reverb.vst3";
-    std::string pluginPath = "--- Plugin fullpath and plugin name ---";
+    std::string pluginPath = "C:\\Program Files\\Common Files\\VST3\\iZotope\\RX 8 De-reverb.vst3";
+    //std::string pluginPath = "--- Plugin fullpath and plugin name ---";
     
     
     if (argc > 1) {
