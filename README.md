@@ -9,7 +9,7 @@ OwnVst3Host is a C++ library that provides a simplified interface for hosting VS
 ## Features
 
 - Load VST3 plugins from file paths
-- Get plugin information (name, vendor, version, etc.)
+- Get plugin information (name, vendor, etc.)
 - Create and manage plugin editor UI
 - List, get, and set plugin parameters
 - Process audio through plugins
@@ -144,7 +144,6 @@ The main class for interacting with VST3 plugins.
 - `bool isEffect()` - Checks if the plugin is an effect
 - `std::string getName()` - Gets the plugin name
 - `std::string getVendor()` - Gets the plugin vendor
-- `std::string getVersion()` - Gets the plugin version
 - `std::string getPluginInfo()` - Gets formatted plugin information
 
 ## License
