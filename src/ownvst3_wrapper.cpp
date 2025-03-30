@@ -178,11 +178,6 @@ const char* VST3Plugin_GetVendor(VST3PluginHandle handle) {
     return g_stringCache.addString(static_cast<Vst3Plugin*>(handle)->getVendor());
 }
 
-const char* VST3Plugin_GetVersion(VST3PluginHandle handle) {
-    if (!handle) return "";
-    return g_stringCache.addString(static_cast<Vst3Plugin*>(handle)->getVersion());
-}
-
 const char* VST3Plugin_GetPluginInfo(VST3PluginHandle handle) {
     if (!handle) return "";
     return g_stringCache.addString(static_cast<Vst3Plugin*>(handle)->getPluginInfo());

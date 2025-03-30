@@ -447,41 +447,11 @@ public:
         return "";
     }
     
-    // Gets the plugin version
-    std::string getVersion() {
-        if (!factory) return "";
-        
-        // Version from factory info
-        PFactoryInfo factoryInfo;
-        if (factory->getFactoryInfo(&factoryInfo) == kResultOk) {
-            // Extract version if available
-            if (factoryInfo.flags & PFactoryInfo::kClassesDiscardable) {
-                return "1.0.0 (Dynamic)";
-            }
-        }
-        
-        // Return simple component version
-        if (component) {
-            int32 version = 0;
-            if (component->queryInterface(IComponent::iid, (void**)&version) == kResultOk) {
-                char versionStr[64];
-                snprintf(versionStr, sizeof(versionStr), "%d.%d.%d", 
-                         (version >> 16) & 0xFF,    // major
-                         (version >> 8) & 0xFF,     // minor
-                         version & 0xFF);           // micro
-                return versionStr;
-            }
-        }
-        
-        return "1.0.0"; // Default
-    }
-    
     // Gets formatted plugin information
     std::string getPluginInfo() {
         std::string info;
         info += "Name: " + getName() + "\n";
         info += "Vendor: " + getVendor() + "\n";
-        info += "Version: " + getVersion() + "\n";
         
         // Number of input/output buses
         if (component) {
@@ -691,9 +661,9 @@ public:
         return impl->getVendor();
     }
 
-    std::string Vst3Plugin::getVersion() {
-        return impl->getVersion();
-    }
+    // std::string Vst3Plugin::getVersion() {
+    //     return impl->getVersion();
+    // }
 
     std::string Vst3Plugin::getPluginInfo() {
         return impl->getPluginInfo();
