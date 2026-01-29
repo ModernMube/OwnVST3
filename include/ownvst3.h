@@ -70,6 +70,7 @@ public:
     bool createEditor(void* windowHandle);  // Creates and attaches editor to window
     void closeEditor();                     // Closes the editor
     void resizeEditor(int width, int height); // Resizes the editor window
+    bool getEditorSize(int& width, int& height); // Gets the editor's preferred size
     
     // Parameter management functions
     std::vector<Vst3Parameter> getParameters(); // Gets all plugin parameters
