@@ -27,7 +27,7 @@ OwnVst3Host is a C++ library that provides a simplified interface for hosting VS
 
 ## Requirements
 
-- C++11 or higher
+- C++14 or higher
 - VST3 SDK (Steinberg)
 - Windows, macOS, or Linux operating system
 
@@ -41,7 +41,9 @@ git clone --recurse-submodules https://github.com/ModernMube/OwnVST3.git
 
 1. Include the OwnVst3Host header and source files in your project
 2. Make sure the VST3 SDK is properly set up and linked
-3. Define `OWN_VST3_HOST_EXPORTS` when building the library as a DLL
+3. When building as a DLL, define:
+   - `OWN_VST3_HOST_EXPORTS` for the C++ API
+   - `OWN_VST3_WRAPPER_EXPORTS` for the C wrapper API
 
 ## Build Windows
 
@@ -137,6 +139,7 @@ The main class for interacting with VST3 plugins.
 - `bool createEditor(void* windowHandle)` - Creates and attaches the plugin's editor to a window
 - `void closeEditor()` - Closes the plugin editor
 - `void resizeEditor(int width, int height)` - Resizes the plugin editor window
+- `bool getEditorSize(int& width, int& height)` - Gets the editor's preferred size
 
 #### Parameter Management
 - `std::vector<Vst3Parameter> getParameters()` - Gets all available parameters
@@ -147,12 +150,40 @@ The main class for interacting with VST3 plugins.
 - `bool processAudio(AudioBuffer& buffer)` - Processes audio through the plugin
 - `bool processMidi(const std::vector<MidiEvent>& events)` - Sends MIDI events to the plugin
 
-#### Plugin Information
+#### Plugin Type
 - `bool isInstrument()` - Checks if the plugin is an instrument
 - `bool isEffect()` - Checks if the plugin is an effect
+
+#### Plugin Information
 - `std::string getName()` - Gets the plugin name
 - `std::string getVendor()` - Gets the plugin vendor
 - `std::string getPluginInfo()` - Gets formatted plugin information
+
+### C Wrapper API
+
+A C-compatible wrapper is available for use with languages that can interface with C but not C++. Include `ownvst3_wrapper.h` for access.
+
+#### Functions
+- `VST3PluginHandle VST3Plugin_Create()` - Creates a new plugin instance
+- `void VST3Plugin_Destroy(VST3PluginHandle handle)` - Destroys a plugin instance
+- `bool VST3Plugin_LoadPlugin(VST3PluginHandle handle, const char* pluginPath)` - Loads a plugin
+- `bool VST3Plugin_Initialize(VST3PluginHandle handle, double sampleRate, int maxBlockSize)` - Initializes the plugin
+- `bool VST3Plugin_CreateEditor(VST3PluginHandle handle, void* windowHandle)` - Creates editor
+- `void VST3Plugin_CloseEditor(VST3PluginHandle handle)` - Closes editor
+- `void VST3Plugin_ResizeEditor(VST3PluginHandle handle, int width, int height)` - Resizes editor
+- `bool VST3Plugin_GetEditorSize(VST3PluginHandle handle, int* width, int* height)` - Gets editor size
+- `int VST3Plugin_GetParameterCount(VST3PluginHandle handle)` - Gets parameter count
+- `bool VST3Plugin_GetParameterAt(VST3PluginHandle handle, int index, VST3ParameterC* parameter)` - Gets parameter by index
+- `bool VST3Plugin_SetParameter(VST3PluginHandle handle, int paramId, double value)` - Sets parameter
+- `double VST3Plugin_GetParameter(VST3PluginHandle handle, int paramId)` - Gets parameter value
+- `bool VST3Plugin_ProcessAudio(VST3PluginHandle handle, AudioBufferC* buffer)` - Processes audio
+- `bool VST3Plugin_ProcessMidi(VST3PluginHandle handle, const MidiEventC* events, int eventCount)` - Processes MIDI
+- `bool VST3Plugin_IsInstrument(VST3PluginHandle handle)` - Checks if instrument
+- `bool VST3Plugin_IsEffect(VST3PluginHandle handle)` - Checks if effect
+- `const char* VST3Plugin_GetName(VST3PluginHandle handle)` - Gets plugin name
+- `const char* VST3Plugin_GetVendor(VST3PluginHandle handle)` - Gets plugin vendor
+- `const char* VST3Plugin_GetPluginInfo(VST3PluginHandle handle)` - Gets plugin info
+- `void VST3Plugin_ClearStringCache()` - Clears the internal string cache
 
 ## License
 
