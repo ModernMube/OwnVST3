@@ -62,6 +62,9 @@ OWN_VST3_WRAPPER_API void VST3Plugin_CloseEditor(VST3PluginHandle handle);
 // Resize plugin editor
 OWN_VST3_WRAPPER_API void VST3Plugin_ResizeEditor(VST3PluginHandle handle, int width, int height);
 
+// Get plugin editor size
+OWN_VST3_WRAPPER_API bool VST3Plugin_GetEditorSize(VST3PluginHandle handle, int* width, int* height);
+
 // Get parameter count
 OWN_VST3_WRAPPER_API int VST3Plugin_GetParameterCount(VST3PluginHandle handle);
 

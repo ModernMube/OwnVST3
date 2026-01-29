@@ -93,6 +93,11 @@ void VST3Plugin_ResizeEditor(VST3PluginHandle handle, int width, int height) {
     }
 }
 
+bool VST3Plugin_GetEditorSize(VST3PluginHandle handle, int* width, int* height) {
+    if (!handle || !width || !height) return false;
+    return static_cast<Vst3Plugin*>(handle)->getEditorSize(*width, *height);
+}
+
 int VST3Plugin_GetParameterCount(VST3PluginHandle handle) {
     if (!handle) return 0;
     return static_cast<Vst3Plugin*>(handle)->getParameters().size();

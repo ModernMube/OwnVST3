@@ -213,6 +213,21 @@ public:
             view->onSize(&viewRect);
         }
     }
+
+    // Gets the plugin editor's preferred size
+    bool getEditorSize(int& width, int& height) {
+        if (view) {
+            ViewRect rect;
+            if (view->getSize(&rect) == kResultOk) {
+                width = rect.getWidth();
+                height = rect.getHeight();
+                return true;
+            }
+        }
+        width = 0;
+        height = 0;
+        return false;
+    }
     
     // Initializes the plugin with specified sample rate and block size
     bool initialize(double newSampleRate, int newBlockSize) {
@@ -619,6 +634,10 @@ public:
 
     void Vst3Plugin::resizeEditor(int width, int height) {
         impl->resizeEditor(width, height);
+    }
+
+    bool Vst3Plugin::getEditorSize(int& width, int& height) {
+        return impl->getEditorSize(width, height);
     }
 
     std::vector<Vst3Parameter> Vst3Plugin::getParameters() {
