@@ -2,10 +2,10 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Project information and version
-project(ownvst3 
-    VERSION 1.0.2
+project(ownvst3
+    VERSION 1.1.0
     DESCRIPTION "A lightweight C++ wrapper for loading and working with VST3 plugins."
-    HOMEPAGE_URL "https://github.com/ModernMube/OwnVST3Host"
+    HOMEPAGE_URL "https://github.com/ModernMube/OwnVST3"
 )
 
 # C++17 standard (required for std::filesystem in VST3 SDK)
