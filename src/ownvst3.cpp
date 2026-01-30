@@ -478,7 +478,20 @@ public:
         
         return "";
     }
-    
+
+    // Gets the plugin version
+    std::string getVersion() {
+        if (!factory) return "";
+
+        // Try to get version from PClassInfo2
+        PClassInfo2 classInfo;
+        if (factory->getClassInfo2(0, &classInfo) == kResultOk) {
+            return classInfo.version;
+        }
+
+        return "";
+    }
+
     // Gets formatted plugin information
     std::string getPluginInfo() {
         std::string info;
