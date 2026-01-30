@@ -95,7 +95,7 @@ OWN_VST3_WRAPPER_API bool VST3Plugin_IsEffect(VST3PluginHandle handle);
 // Plugin information
 OWN_VST3_WRAPPER_API const char* VST3Plugin_GetName(VST3PluginHandle handle);
 OWN_VST3_WRAPPER_API const char* VST3Plugin_GetVendor(VST3PluginHandle handle);
-// OWN_VST3_WRAPPER_API const char* VST3Plugin_GetVersion(VST3PluginHandle handle);
+OWN_VST3_WRAPPER_API const char* VST3Plugin_GetVersion(VST3PluginHandle handle);
 OWN_VST3_WRAPPER_API const char* VST3Plugin_GetPluginInfo(VST3PluginHandle handle);
 
 // Helper function to clear string cache
