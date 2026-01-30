@@ -310,17 +310,17 @@ public:
         tresult result = kResultFalse;
 
         #ifdef _WIN32
-        result = view->attached(windowHandle, kPlatformStringWin);
+        result = view->attached(windowHandle, kPlatformTypeHWND);
         if (result != kResultOk) {
             std::cerr << "Windows attach failed (result: 0x" << std::hex << result << ")" << std::endl;
         }
         #elif defined(__APPLE__)
-        result = view->attached(windowHandle, kPlatformStringMac);
+        result = view->attached(windowHandle, kPlatformTypeNSView);
         if (result != kResultOk) {
             std::cerr << "macOS attach failed (result: 0x" << std::hex << result << ")" << std::endl;
         }
         #elif defined(__linux__)
-        result = view->attached(windowHandle, kPlatformStringLinux);
+        result = view->attached(windowHandle, kPlatformTypeX11EmbedWindowID);
         if (result != kResultOk) {
             std::cerr << "Linux attach failed (result: 0x" << std::hex << result << ")" << std::endl;
         }
