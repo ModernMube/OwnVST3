@@ -19,7 +19,7 @@
 #elif defined(__APPLE__)
     #include <Cocoa/Cocoa.h>
     #include <objc/runtime.h>
-#elif defined(__linux__)
+#elif defined(__linux__) && defined(HAVE_X11)
     #include <X11/Xlib.h>
 #endif
 
@@ -218,7 +218,7 @@ public:
                     childView = nullptr;
                 }
             }
-            #elif defined(__linux__)
+            #elif defined(__linux__) && defined(HAVE_X11)
             if (childWindow) {
                 if (xDisplay) {
                     XDestroyWindow(xDisplay, childWindow);
@@ -331,7 +331,7 @@ public:
                 }
             }
         }
-        #elif defined(__linux__)
+        #elif defined(__linux__) && defined(HAVE_X11)
         // Linux: Create an X11 child window
         unsigned long parentWindow = (unsigned long)windowHandle;
         if (parentWindow && !childWindow && width > 0 && height > 0) {
@@ -415,7 +415,7 @@ public:
                 childView = nullptr;
             }
         }
-        #elif defined(__linux__)
+        #elif defined(__linux__) && defined(HAVE_X11)
         if (childWindow) {
             if (xDisplay) {
                 XDestroyWindow(xDisplay, childWindow);
@@ -827,7 +827,7 @@ public:
     HWND childWindow = nullptr;                     // Child window for plugin view on Windows
     #elif defined(__APPLE__)
     void* childView = nullptr;                      // NSView for plugin view on macOS
-    #elif defined(__linux__)
+    #elif defined(__linux__) && defined(HAVE_X11)
     unsigned long childWindow = 0;                  // X11 Window for plugin view on Linux
     Display* xDisplay = nullptr;                    // X11 Display connection
     #endif
