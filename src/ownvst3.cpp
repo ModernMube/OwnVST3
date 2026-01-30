@@ -285,81 +285,23 @@ public:
             height = rect.getHeight();
         }
 
+        // NOTE: VST3 plugins create their own child controls inside the parent window
+        // We do NOT need to create a child window ourselves
+
         #ifdef _WIN32
-        // Windows: Create a child HWND window
+        // Windows: Verify parent window and let plugin create its own controls
         HWND parentHwnd = (HWND)windowHandle;
-        if (parentHwnd && !childWindow && width > 0 && height > 0) {
-            std::cout << "Creating Windows child window " << width << "x" << height << std::endl;
-
-            childWindow = CreateWindowEx(
-                0,
-                L"STATIC",
-                L"VST3",
-                WS_CHILD | WS_VISIBLE,
-                0, 0, width, height,
-                parentHwnd,
-                NULL,
-                GetModuleHandle(NULL),
-                NULL
-            );
-
-            if (childWindow) {
-                std::cout << "Child window created: " << childWindow << std::endl;
-                windowHandle = childWindow;
-            } else {
-                std::cerr << "Failed to create child window, error: " << GetLastError() << std::endl;
-            }
+        if (!IsWindow(parentHwnd)) {
+            std::cerr << "Invalid parent window handle" << std::endl;
+        } else {
+            std::cout << "Parent HWND verified: " << parentHwnd << std::endl;
         }
         #elif defined(__APPLE__)
-        // macOS: Create an NSView child view
-        @autoreleasepool {
-            NSView* parentView = (__bridge NSView*)windowHandle;
-            if (parentView && !childView && width > 0 && height > 0) {
-                std::cout << "Creating macOS child view " << width << "x" << height << std::endl;
-
-                // Create NSView with frame
-                NSRect frame = NSMakeRect(0, 0, width, height);
-                NSView* newChildView = [[NSView alloc] initWithFrame:frame];
-
-                if (newChildView) {
-                    [parentView addSubview:newChildView];
-                    childView = (__bridge_retained void*)newChildView;
-                    windowHandle = childView;
-                    std::cout << "Child view created successfully" << std::endl;
-                } else {
-                    std::cerr << "Failed to create NSView" << std::endl;
-                }
-            }
-        }
+        // macOS: Let plugin create its own NSView child
+        std::cout << "Parent NSView: " << windowHandle << std::endl;
         #elif defined(__linux__) && defined(HAVE_X11)
-        // Linux: Create an X11 child window
-        unsigned long parentWindow = (unsigned long)windowHandle;
-        if (parentWindow && !childWindow && width > 0 && height > 0) {
-            std::cout << "Creating Linux X11 child window " << width << "x" << height << std::endl;
-
-            xDisplay = XOpenDisplay(NULL);
-            if (xDisplay) {
-                int screen = DefaultScreen(xDisplay);
-                childWindow = XCreateSimpleWindow(
-                    xDisplay,
-                    parentWindow,
-                    0, 0, width, height, 0,
-                    BlackPixel(xDisplay, screen),
-                    WhitePixel(xDisplay, screen)
-                );
-
-                if (childWindow) {
-                    XMapWindow(xDisplay, childWindow);
-                    XFlush(xDisplay);
-                    windowHandle = (void*)childWindow;
-                    std::cout << "Child window created: " << childWindow << std::endl;
-                } else {
-                    std::cerr << "Failed to create X11 child window" << std::endl;
-                }
-            } else {
-                std::cerr << "Failed to open X11 display" << std::endl;
-            }
-        }
+        // Linux: Let plugin create its own X11 window
+        std::cout << "Parent X11 Window: " << windowHandle << std::endl;
         #endif
 
         std::cout << "Attempting to attach view to window (handle: " << windowHandle << ")" << std::endl;
