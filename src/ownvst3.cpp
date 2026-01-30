@@ -306,25 +306,31 @@ public:
 
         std::cout << "Attempting to attach view to window (handle: " << windowHandle << ")" << std::endl;
 
-        // Try to attach to window with platform-specific type
-        tresult result = view->attached(windowHandle, kPlatformStringWin);
-        if (result != kResultOk)
-        {
-            std::cerr << "Windows attach failed (result: " << std::hex << result << ")" << std::endl;
-            result = view->attached(windowHandle, kPlatformStringMac);
-            if(result != kResultOk)
-            {
-                std::cerr << "Mac attach failed (result: " << std::hex << result << ")" << std::endl;
-                result = view->attached(windowHandle, kPlatformStringLinux);
-                if(result != kResultOk)
-                {
-                    std::cerr << "Linux attach failed (result: " << std::hex << result << ")" << std::endl;
-                    std::cerr << "Failed to attach editor to window on any platform" << std::endl;
-                    view->setFrame(nullptr);
-                    view = nullptr;
-                    return false;
-                }
-            }
+        // Attach to window with correct platform-specific type
+        tresult result = kResultFalse;
+
+        #ifdef _WIN32
+        result = view->attached(windowHandle, kPlatformStringWin);
+        if (result != kResultOk) {
+            std::cerr << "Windows attach failed (result: 0x" << std::hex << result << ")" << std::endl;
+        }
+        #elif defined(__APPLE__)
+        result = view->attached(windowHandle, kPlatformStringMac);
+        if (result != kResultOk) {
+            std::cerr << "macOS attach failed (result: 0x" << std::hex << result << ")" << std::endl;
+        }
+        #elif defined(__linux__)
+        result = view->attached(windowHandle, kPlatformStringLinux);
+        if (result != kResultOk) {
+            std::cerr << "Linux attach failed (result: 0x" << std::hex << result << ")" << std::endl;
+        }
+        #endif
+
+        if (result != kResultOk) {
+            std::cerr << "Failed to attach editor to window" << std::endl;
+            view->setFrame(nullptr);
+            view = nullptr;
+            return false;
         }
 
         std::cout << "View attached successfully!" << std::endl;
