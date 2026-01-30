@@ -483,10 +483,13 @@ public:
     std::string getVersion() {
         if (!factory) return "";
 
-        // Try to get version from PClassInfo2
-        PClassInfo2 classInfo;
-        if (factory->getClassInfo2(0, &classInfo) == kResultOk) {
-            return classInfo.version;
+        // Try to query IPluginFactory2 interface for version info
+        FUnknownPtr<IPluginFactory2> factory2(factory);
+        if (factory2) {
+            PClassInfo2 classInfo;
+            if (factory2->getClassInfo2(0, &classInfo) == kResultOk) {
+                return classInfo.version;
+            }
         }
 
         return "";
