@@ -227,20 +227,31 @@ public:
         }
 
         // If no view exists, try to create a temporary one to get size
-        if (controller) {
-            IPlugView* tempView = controller->createView(ViewType::kEditor);
-            if (tempView) {
-                ViewRect rect;
-                if (tempView->getSize(&rect) == kResultOk) {
-                    width = rect.getWidth();
-                    height = rect.getHeight();
-                    tempView->release();
-                    return true;
-                }
-                tempView->release();
-            }
+        if (!controller) {
+            std::cerr << "No controller available for editor" << std::endl;
+            width = 0;
+            height = 0;
+            return false;
         }
 
+        IPlugView* tempView = controller->createView(ViewType::kEditor);
+        if (!tempView) {
+            std::cerr << "Plugin does not support editor view (createView returned null)" << std::endl;
+            width = 0;
+            height = 0;
+            return false;
+        }
+
+        ViewRect rect;
+        if (tempView->getSize(&rect) == kResultOk) {
+            width = rect.getWidth();
+            height = rect.getHeight();
+            tempView->release();
+            return true;
+        }
+
+        std::cerr << "Failed to get editor size from view" << std::endl;
+        tempView->release();
         width = 0;
         height = 0;
         return false;
