@@ -16,9 +16,16 @@
 
 #ifdef _WIN32
     #include <windows.h>
-#else
+#elif defined(__APPLE__)
+    #include <Cocoa/Cocoa.h>
+    #include <objc/runtime.h>
+#elif defined(__linux__)
+    #include <X11/Xlib.h>
+#endif
+
+#ifndef _WIN32
     #include <locale>
-    #include <codecvt>  
+    #include <codecvt>
 #endif
 
 using namespace Steinberg;
@@ -197,11 +204,28 @@ public:
                 plugFrame = nullptr;
             }
 
+            // Clean up platform-specific child window/view
             #ifdef _WIN32
-            // Destroy child window on Windows
             if (childWindow) {
                 DestroyWindow(childWindow);
                 childWindow = nullptr;
+            }
+            #elif defined(__APPLE__)
+            if (childView) {
+                @autoreleasepool {
+                    NSView* view = (__bridge_transfer NSView*)childView;
+                    [view removeFromSuperview];
+                    childView = nullptr;
+                }
+            }
+            #elif defined(__linux__)
+            if (childWindow) {
+                if (xDisplay) {
+                    XDestroyWindow(xDisplay, childWindow);
+                    XCloseDisplay(xDisplay);
+                    xDisplay = nullptr;
+                }
+                childWindow = 0;
             }
             #endif
 
@@ -253,36 +277,87 @@ public:
         }
         view->setFrame(plugFrame);
 
+        // Get plugin view size for child view/window creation
+        ViewRect rect;
+        int width = 0, height = 0;
+        if (view->getSize(&rect) == kResultOk) {
+            width = rect.getWidth();
+            height = rect.getHeight();
+        }
+
         #ifdef _WIN32
-        // On Windows, create a child window for the plugin view
+        // Windows: Create a child HWND window
         HWND parentHwnd = (HWND)windowHandle;
-        if (parentHwnd && !childWindow) {
-            // Get plugin view size
-            ViewRect rect;
-            if (view->getSize(&rect) == kResultOk) {
-                int width = rect.getWidth();
-                int height = rect.getHeight();
+        if (parentHwnd && !childWindow && width > 0 && height > 0) {
+            std::cout << "Creating Windows child window " << width << "x" << height << std::endl;
 
-                std::cout << "Creating child window " << width << "x" << height << std::endl;
+            childWindow = CreateWindowEx(
+                0,
+                L"STATIC",
+                L"VST3",
+                WS_CHILD | WS_VISIBLE,
+                0, 0, width, height,
+                parentHwnd,
+                NULL,
+                GetModuleHandle(NULL),
+                NULL
+            );
 
-                childWindow = CreateWindowEx(
-                    0,
-                    L"STATIC",  // Simple window class
-                    L"VST3",
-                    WS_CHILD | WS_VISIBLE,
-                    0, 0, width, height,
-                    parentHwnd,
-                    NULL,
-                    GetModuleHandle(NULL),
-                    NULL
+            if (childWindow) {
+                std::cout << "Child window created: " << childWindow << std::endl;
+                windowHandle = childWindow;
+            } else {
+                std::cerr << "Failed to create child window, error: " << GetLastError() << std::endl;
+            }
+        }
+        #elif defined(__APPLE__)
+        // macOS: Create an NSView child view
+        @autoreleasepool {
+            NSView* parentView = (__bridge NSView*)windowHandle;
+            if (parentView && !childView && width > 0 && height > 0) {
+                std::cout << "Creating macOS child view " << width << "x" << height << std::endl;
+
+                // Create NSView with frame
+                NSRect frame = NSMakeRect(0, 0, width, height);
+                NSView* newChildView = [[NSView alloc] initWithFrame:frame];
+
+                if (newChildView) {
+                    [parentView addSubview:newChildView];
+                    childView = (__bridge_retained void*)newChildView;
+                    windowHandle = childView;
+                    std::cout << "Child view created successfully" << std::endl;
+                } else {
+                    std::cerr << "Failed to create NSView" << std::endl;
+                }
+            }
+        }
+        #elif defined(__linux__)
+        // Linux: Create an X11 child window
+        unsigned long parentWindow = (unsigned long)windowHandle;
+        if (parentWindow && !childWindow && width > 0 && height > 0) {
+            std::cout << "Creating Linux X11 child window " << width << "x" << height << std::endl;
+
+            xDisplay = XOpenDisplay(NULL);
+            if (xDisplay) {
+                int screen = DefaultScreen(xDisplay);
+                childWindow = XCreateSimpleWindow(
+                    xDisplay,
+                    parentWindow,
+                    0, 0, width, height, 0,
+                    BlackPixel(xDisplay, screen),
+                    WhitePixel(xDisplay, screen)
                 );
 
                 if (childWindow) {
+                    XMapWindow(xDisplay, childWindow);
+                    XFlush(xDisplay);
+                    windowHandle = (void*)childWindow;
                     std::cout << "Child window created: " << childWindow << std::endl;
-                    windowHandle = childWindow;  // Use child window for attach
                 } else {
-                    std::cerr << "Failed to create child window, error: " << GetLastError() << std::endl;
+                    std::cerr << "Failed to create X11 child window" << std::endl;
                 }
+            } else {
+                std::cerr << "Failed to open X11 display" << std::endl;
             }
         }
         #endif
@@ -325,10 +400,29 @@ public:
             plugFrame->release();
             plugFrame = nullptr;
         }
+
+        // Clean up platform-specific child window/view
         #ifdef _WIN32
         if (childWindow) {
             DestroyWindow(childWindow);
             childWindow = nullptr;
+        }
+        #elif defined(__APPLE__)
+        if (childView) {
+            @autoreleasepool {
+                NSView* view = (__bridge_transfer NSView*)childView;
+                [view removeFromSuperview];
+                childView = nullptr;
+            }
+        }
+        #elif defined(__linux__)
+        if (childWindow) {
+            if (xDisplay) {
+                XDestroyWindow(xDisplay, childWindow);
+                XCloseDisplay(xDisplay);
+                xDisplay = nullptr;
+            }
+            childWindow = 0;
         }
         #endif
     }
@@ -728,8 +822,14 @@ public:
     double sampleRate;                             // Current sample rate
     int blockSize;                                 // Current block size
 
+    // Platform-specific child window/view handles
     #ifdef _WIN32
     HWND childWindow = nullptr;                     // Child window for plugin view on Windows
+    #elif defined(__APPLE__)
+    void* childView = nullptr;                      // NSView for plugin view on macOS
+    #elif defined(__linux__)
+    unsigned long childWindow = 0;                  // X11 Window for plugin view on Linux
+    Display* xDisplay = nullptr;                    // X11 Display connection
     #endif
 
     #ifdef _WIN32

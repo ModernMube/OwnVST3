@@ -169,7 +169,8 @@ if(APPLE)
     set_source_files_properties(
         ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm
         ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm
-        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3.cpp
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc -x objective-c++"
     )
 endif()
 
@@ -201,7 +202,9 @@ elseif(APPLE)
     target_link_libraries(ownvst3 PRIVATE ${CORE_FOUNDATION} ${COCOA})
 elseif(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
-    target_link_libraries(ownvst3 PRIVATE dl pthread stdc++fs)
+    find_package(X11 REQUIRED)
+    target_link_libraries(ownvst3 PRIVATE dl pthread stdc++fs ${X11_LIBRARIES})
+    target_include_directories(ownvst3 PRIVATE ${X11_INCLUDE_DIR})
 endif()
 
 # Platform-specific links for the test executable
@@ -213,7 +216,9 @@ elseif(APPLE)
     target_link_libraries(ownvst3_test PRIVATE ${CORE_FOUNDATION} ${COCOA})
 elseif(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
-    target_link_libraries(ownvst3_test PRIVATE dl pthread stdc++fs)
+    find_package(X11 REQUIRED)
+    target_link_libraries(ownvst3_test PRIVATE dl pthread stdc++fs ${X11_LIBRARIES})
+    target_include_directories(ownvst3_test PRIVATE ${X11_INCLUDE_DIR})
 endif()
 
 # Export headers
