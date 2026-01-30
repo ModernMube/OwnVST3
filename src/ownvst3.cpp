@@ -197,6 +197,14 @@ public:
                 plugFrame = nullptr;
             }
 
+            #ifdef _WIN32
+            // Destroy child window on Windows
+            if (childWindow) {
+                DestroyWindow(childWindow);
+                childWindow = nullptr;
+            }
+            #endif
+
             // 2. Deaktiválás, ha még aktív
             if (component) {
                 try {
@@ -223,14 +231,21 @@ public:
 
     // Creates and attaches the plugin's editor to a window
     bool createEditor(void* windowHandle) {
-        if (!controller) return false;
-        
+        if (!controller) {
+            std::cerr << "No controller available" << std::endl;
+            return false;
+        }
+
+        std::cout << "Creating editor view..." << std::endl;
+
         // Create editor view
         view = controller->createView(ViewType::kEditor);
         if (!view) {
-            std::cerr << "Failed to create editor" << std::endl;
+            std::cerr << "Failed to create editor view" << std::endl;
             return false;
         }
+
+        std::cout << "View created successfully" << std::endl;
 
         // Create and set plug frame
         if (!plugFrame) {
@@ -238,14 +253,56 @@ public:
         }
         view->setFrame(plugFrame);
 
+        #ifdef _WIN32
+        // On Windows, create a child window for the plugin view
+        HWND parentHwnd = (HWND)windowHandle;
+        if (parentHwnd && !childWindow) {
+            // Get plugin view size
+            ViewRect rect;
+            if (view->getSize(&rect) == kResultOk) {
+                int width = rect.getWidth();
+                int height = rect.getHeight();
+
+                std::cout << "Creating child window " << width << "x" << height << std::endl;
+
+                childWindow = CreateWindowEx(
+                    0,
+                    L"STATIC",  // Simple window class
+                    L"VST3",
+                    WS_CHILD | WS_VISIBLE,
+                    0, 0, width, height,
+                    parentHwnd,
+                    NULL,
+                    GetModuleHandle(NULL),
+                    NULL
+                );
+
+                if (childWindow) {
+                    std::cout << "Child window created: " << childWindow << std::endl;
+                    windowHandle = childWindow;  // Use child window for attach
+                } else {
+                    std::cerr << "Failed to create child window, error: " << GetLastError() << std::endl;
+                }
+            }
+        }
+        #endif
+
+        std::cout << "Attempting to attach view to window (handle: " << windowHandle << ")" << std::endl;
+
         // Try to attach to window with platform-specific type
-        if (view->attached(windowHandle, kPlatformStringWin) != kResultOk)
+        tresult result = view->attached(windowHandle, kPlatformStringWin);
+        if (result != kResultOk)
         {
-            if(view->attached(windowHandle, kPlatformStringMac) != kResultOk)
+            std::cerr << "Windows attach failed (result: " << std::hex << result << ")" << std::endl;
+            result = view->attached(windowHandle, kPlatformStringMac);
+            if(result != kResultOk)
             {
-                if(view->attached(windowHandle, kPlatformStringLinux) != kResultOk)
+                std::cerr << "Mac attach failed (result: " << std::hex << result << ")" << std::endl;
+                result = view->attached(windowHandle, kPlatformStringLinux);
+                if(result != kResultOk)
                 {
-                    std::cerr << "Failed to attach editor to window" << std::endl;
+                    std::cerr << "Linux attach failed (result: " << std::hex << result << ")" << std::endl;
+                    std::cerr << "Failed to attach editor to window on any platform" << std::endl;
                     view->setFrame(nullptr);
                     view = nullptr;
                     return false;
@@ -253,6 +310,7 @@ public:
             }
         }
 
+        std::cout << "View attached successfully!" << std::endl;
         return true;
     }
     
@@ -267,6 +325,12 @@ public:
             plugFrame->release();
             plugFrame = nullptr;
         }
+        #ifdef _WIN32
+        if (childWindow) {
+            DestroyWindow(childWindow);
+            childWindow = nullptr;
+        }
+        #endif
     }
     
     // Resizes the plugin editor window
@@ -663,6 +727,10 @@ public:
     std::vector<Vst3Parameter> parameters;         // Parameter cache
     double sampleRate;                             // Current sample rate
     int blockSize;                                 // Current block size
+
+    #ifdef _WIN32
+    HWND childWindow = nullptr;                     // Child window for plugin view on Windows
+    #endif
 
     #ifdef _WIN32
     // Converts TCHAR to UTF-8 string
