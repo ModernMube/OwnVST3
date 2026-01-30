@@ -216,6 +216,7 @@ public:
 
     // Gets the plugin editor's preferred size
     bool getEditorSize(int& width, int& height) {
+        // If view already exists, use it
         if (view) {
             ViewRect rect;
             if (view->getSize(&rect) == kResultOk) {
@@ -224,6 +225,22 @@ public:
                 return true;
             }
         }
+
+        // If no view exists, try to create a temporary one to get size
+        if (controller) {
+            IPlugView* tempView = controller->createView(ViewType::kEditor);
+            if (tempView) {
+                ViewRect rect;
+                if (tempView->getSize(&rect) == kResultOk) {
+                    width = rect.getWidth();
+                    height = rect.getHeight();
+                    tempView->release();
+                    return true;
+                }
+                tempView->release();
+            }
+        }
+
         width = 0;
         height = 0;
         return false;
