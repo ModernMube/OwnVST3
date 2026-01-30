@@ -680,9 +680,9 @@ public:
         return impl->getVendor();
     }
 
-    // std::string Vst3Plugin::getVersion() {
-    //     return impl->getVersion();
-    // }
+    std::string Vst3Plugin::getVersion() {
+        return impl->getVersion();
+    }
 
     std::string Vst3Plugin::getPluginInfo() {
         return impl->getPluginInfo();
