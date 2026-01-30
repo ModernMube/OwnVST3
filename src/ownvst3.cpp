@@ -12,6 +12,7 @@
 #include "base/source/fobject.h"
 
 #include <iostream>
+#include <atomic>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -24,6 +25,49 @@ using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 namespace OwnVst3Host {
+
+// Simple IPlugFrame implementation for plugin view
+class PlugFrame : public IPlugFrame {
+public:
+    PlugFrame() : refCount(1) {}
+    virtual ~PlugFrame() {}
+
+    // IPlugFrame interface
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* newSize) override {
+        // For now, just accept the resize request
+        if (view && newSize) {
+            return kResultOk;
+        }
+        return kResultFalse;
+    }
+
+    // FUnknown interface
+    tresult PLUGIN_API queryInterface(const TUID _iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(_iid, IPlugFrame::iid) ||
+            FUnknownPrivate::iidEqual(_iid, FUnknown::iid)) {
+            *obj = this;
+            addRef();
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override {
+        return ++refCount;
+    }
+
+    uint32 PLUGIN_API release() override {
+        if (--refCount == 0) {
+            delete this;
+            return 0;
+        }
+        return refCount;
+    }
+
+private:
+    std::atomic<uint32> refCount;
+};
 
 class Vst3PluginImpl : public FObject {
 public:
@@ -142,21 +186,28 @@ public:
         try {
             // 1. Távolítsuk el a nézetet
             if (view) {
+                view->setFrame(nullptr);
                 view->removed();
                 view = nullptr;
             }
-            
+
+            // Release plug frame
+            if (plugFrame) {
+                plugFrame->release();
+                plugFrame = nullptr;
+            }
+
             // 2. Deaktiválás, ha még aktív
             if (component) {
                 try {
                     component->setActive(false);
                 } catch (...) {}
             }
-            
+
             // 3. Minden referenciát null-ra állítunk, de nem hívunk terminate-et
             view = nullptr;
             processor = nullptr;
-            
+
             // Fontos: Elengedjük a referenciákat, de nem hívunk terminate-et
             controller = nullptr;
             component = nullptr;
@@ -180,29 +231,41 @@ public:
             std::cerr << "Failed to create editor" << std::endl;
             return false;
         }
-        
+
+        // Create and set plug frame
+        if (!plugFrame) {
+            plugFrame = new PlugFrame();
+        }
+        view->setFrame(plugFrame);
+
         // Try to attach to window with platform-specific type
-        if (view->attached(windowHandle, kPlatformStringWin) != kResultOk) 
+        if (view->attached(windowHandle, kPlatformStringWin) != kResultOk)
         {
-            if(view->attached(windowHandle, kPlatformStringMac) != kResultOk) 
+            if(view->attached(windowHandle, kPlatformStringMac) != kResultOk)
             {
                 if(view->attached(windowHandle, kPlatformStringLinux) != kResultOk)
                 {
                     std::cerr << "Failed to attach editor to window" << std::endl;
+                    view->setFrame(nullptr);
                     view = nullptr;
                     return false;
                 }
             }
         }
-        
+
         return true;
     }
     
     // Closes the plugin editor
     void closeEditor() {
         if (view) {
+            view->setFrame(nullptr);
             view->removed();
             view = nullptr;
+        }
+        if (plugFrame) {
+            plugFrame->release();
+            plugFrame = nullptr;
         }
     }
     
@@ -595,6 +658,7 @@ public:
     IEditController* controller = nullptr;         // Edit controller interface
     IAudioProcessor* processor = nullptr;          // Audio processor interface
     IPlugView* view = nullptr;                     // Plugin view interface
+    PlugFrame* plugFrame = nullptr;                // Plugin frame for view communication
 
     std::vector<Vst3Parameter> parameters;         // Parameter cache
     double sampleRate;                             // Current sample rate
