@@ -69,8 +69,7 @@ public:
                 return false;
             }
             
-            // Create and initialize host application, initialize component
-            Steinberg::Vst::HostApplication hostApp;
+            // Initialize component with persistent host application instance
             if (component->initialize(&hostApp) != kResultOk) {
                 std::cerr << "Component initialization failed" << std::endl;
                 return false;
@@ -108,9 +107,9 @@ public:
                 
                 // Initialize controller if created successfully
                 if (controller) {
-                    Steinberg::Vst::HostApplication hostApp;
+                    // Use persistent host application instance
                     controller->initialize(&hostApp);
-                    
+
                     // Connect component and controller
                     connectComponentAndController();
                 }
@@ -572,6 +571,9 @@ public:
     std::vector<Vst3Parameter> parameters;         // Parameter cache
     double sampleRate;                             // Current sample rate
     int blockSize;                                 // Current block size
+
+    // Host application instance - persists for plugin lifetime to avoid dangling pointers
+    Steinberg::Vst::HostApplication hostApp;
 
     #ifdef _WIN32
     // Converts TCHAR to UTF-8 string
