@@ -23,9 +23,13 @@
     #include <codecvt>
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
     #include <sys/select.h>
     #include <unistd.h>
+    #include <time.h>
+#endif
+
+#ifdef __APPLE__
     #include <time.h>
 #endif
 
@@ -34,10 +38,9 @@ using namespace Steinberg::Vst;
 
 namespace OwnVst3Host {
 
-#if defined(__linux__) || defined(__APPLE__)
-// IRunLoop implementation for Linux and macOS
-// Required for VST3 plugins to handle timers and event handlers properly
-// especially for dropdown menus and popup windows
+#ifdef __linux__
+// Linux-specific IRunLoop implementation
+// Required for VST3 plugins on Linux to handle timers and event handlers
 class LinuxRunLoop : public Linux::IRunLoop {
 public:
     LinuxRunLoop() : refCount(1) {}
@@ -149,20 +152,20 @@ private:
 #endif
 
 // IPlugFrame implementation for handling plugin editor window frame
-// Also implements IRunLoop on Linux and macOS for proper event handling
+// Also implements IRunLoop on Linux for proper event handling
 class PlugFrame : public IPlugFrame
-#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
     , public Linux::IRunLoop
 #endif
 {
 public:
     PlugFrame() : refCount(1) {
-#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
         runLoop = new LinuxRunLoop();
 #endif
     }
     virtual ~PlugFrame() {
-#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
         if (runLoop) runLoop->release();
 #endif
     }
@@ -174,8 +177,8 @@ public:
         return kResultOk;
     }
 
-#if defined(__linux__) || defined(__APPLE__)
-    // IRunLoop interface (Linux and macOS)
+#ifdef __linux__
+    // IRunLoop interface (Linux only)
     tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* handler, Linux::FileDescriptor fd) override {
         return runLoop ? runLoop->registerEventHandler(handler, fd) : kResultFalse;
     }
@@ -205,24 +208,13 @@ public:
             addRef();
             return kResultOk;
         }
-#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
         if (FUnknownPrivate::iidEqual(iid, Linux::IRunLoop::iid)) {
             *obj = static_cast<Linux::IRunLoop*>(this);
             addRef();
-            #ifdef __APPLE__
-            std::cout << "[PlugFrame] Plugin requested IRunLoop interface on macOS" << std::endl;
-            #endif
             return kResultOk;
         }
 #endif
-        // Log unhandled interface requests for diagnostics
-        #ifdef __APPLE__
-        char iidStr[33];
-        FUID fuid;
-        fuid.fromTUID(iid);
-        fuid.toString(iidStr);
-        std::cout << "[PlugFrame] Plugin requested unknown interface: " << iidStr << std::endl;
-        #endif
         *obj = nullptr;
         return kNoInterface;
     }
@@ -236,7 +228,7 @@ public:
 
 private:
     std::atomic<uint32> refCount;
-#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
     LinuxRunLoop* runLoop = nullptr;
 #endif
 };
@@ -755,9 +747,8 @@ public:
     // Process idle events - should be called periodically from UI thread
     // This is essential for proper popup menu handling on all platforms
     void processIdle() {
-#if defined(__linux__) || defined(__APPLE__)
-        // On Linux and macOS, process registered timers and event handlers
-        // This is essential for proper dropdown menu and popup window handling
+#ifdef __linux__
+        // On Linux, process registered timers and event handlers
         if (plugFrame) {
             // Get current time in milliseconds
             struct timespec ts;
@@ -765,6 +756,11 @@ public:
             uint64 currentTimeMs = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
             plugFrame->processEvents(currentTimeMs);
         }
+#endif
+#ifdef __APPLE__
+        // On macOS, the native NSRunLoop handles most event processing
+        // but calling processIdle periodically helps with plugin UI responsiveness
+        // This is called by the C# DispatcherTimer at ~60fps
 #endif
 #ifdef _WIN32
         // Process any pending Windows messages
