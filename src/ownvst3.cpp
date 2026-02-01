@@ -218,7 +218,9 @@ public:
         // Log unhandled interface requests for diagnostics
         #ifdef __APPLE__
         char iidStr[33];
-        FUID(iid).toString(iidStr);
+        FUID fuid;
+        fuid.fromTUID(iid);
+        fuid.toString(iidStr);
         std::cout << "[PlugFrame] Plugin requested unknown interface: " << iidStr << std::endl;
         #endif
         *obj = nullptr;
