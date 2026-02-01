@@ -469,16 +469,38 @@ public:
     // Gets the plugin vendor
     std::string getVendor() {
         if (!factory) return "";
-        
+
         // Get factory info for vendor
         PFactoryInfo factoryInfo;
         if (factory->getFactoryInfo(&factoryInfo) == kResultOk) {
             return factoryInfo.vendor;
         }
-        
+
         return "";
     }
-    
+
+    // Gets the plugin version
+    std::string getVersion() {
+        if (!factory) return "";
+
+        // Try to get version from PClassInfo2 (IPluginFactory2)
+        IPluginFactory2* factory2 = nullptr;
+        if (factory->queryInterface(IPluginFactory2::iid, (void**)&factory2) == kResultOk && factory2) {
+            PClassInfo2 classInfo2;
+            for (int32 i = 0; i < factory2->countClasses(); i++) {
+                if (factory2->getClassInfo2(i, &classInfo2) == kResultOk) {
+                    if (strcmp(classInfo2.category, kVstAudioEffectClass) == 0) {
+                        factory2->release();
+                        return classInfo2.version;
+                    }
+                }
+            }
+            factory2->release();
+        }
+
+        return "1.0.0"; // Default version if not available
+    }
+
     // Gets formatted plugin information
     std::string getPluginInfo() {
         std::string info;
