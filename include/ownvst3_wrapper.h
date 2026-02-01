@@ -98,6 +98,12 @@ OWN_VST3_WRAPPER_API const char* VST3Plugin_GetVendor(VST3PluginHandle handle);
 OWN_VST3_WRAPPER_API const char* VST3Plugin_GetVersion(VST3PluginHandle handle);
 OWN_VST3_WRAPPER_API const char* VST3Plugin_GetPluginInfo(VST3PluginHandle handle);
 
+// Process idle events - call this periodically from UI thread for proper popup menu handling
+OWN_VST3_WRAPPER_API void VST3Plugin_ProcessIdle(VST3PluginHandle handle);
+
+// Check if editor is currently open
+OWN_VST3_WRAPPER_API bool VST3Plugin_IsEditorOpen(VST3PluginHandle handle);
+
 // Helper function to clear string cache
 OWN_VST3_WRAPPER_API void VST3Plugin_ClearStringCache();
 

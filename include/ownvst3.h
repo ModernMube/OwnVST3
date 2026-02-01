@@ -96,6 +96,13 @@ public:
     std::string getVersion();    // Gets plugin version
     std::string getPluginInfo(); // Gets formatted plugin information
 
+    // Idle processing - should be called periodically from UI thread
+    // This is essential for proper popup menu handling on all platforms
+    void processIdle();
+
+    // Check if the editor window is currently open
+    bool isEditorOpen();
+
 private:
     std::unique_ptr<Vst3PluginImpl> impl;  // Implementation object (PIMPL pattern)
 
