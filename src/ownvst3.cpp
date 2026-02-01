@@ -182,11 +182,11 @@ public:
         }
         
         // Try to attach to window with platform-specific type
-        if (view->attached(windowHandle, kPlatformStringWin) != kResultOk) 
+        if (view->attached(windowHandle, kPlatformTypeHWND) != kResultOk)
         {
-            if(view->attached(windowHandle, kPlatformStringMac) != kResultOk) 
+            if(view->attached(windowHandle, kPlatformTypeNSView) != kResultOk)
             {
-                if(view->attached(windowHandle, kPlatformStringLinux) != kResultOk)
+                if(view->attached(windowHandle, kPlatformTypeX11EmbedWindowID) != kResultOk)
                 {
                     std::cerr << "Failed to attach editor to window" << std::endl;
                     view = nullptr;
