@@ -30,7 +30,7 @@
 #endif
 
 #ifdef __APPLE__
-    #include <time.h>
+    #include <CoreFoundation/CoreFoundation.h>
 #endif
 
 using namespace Steinberg;
@@ -758,9 +758,10 @@ public:
         }
 #endif
 #ifdef __APPLE__
-        // On macOS, the native NSRunLoop handles most event processing
-        // but calling processIdle periodically helps with plugin UI responsiveness
-        // This is called by the C# DispatcherTimer at ~60fps
+        // On macOS, explicitly pump the run loop to ensure events are processed
+        // even when a modal loop might be active or the main thread is busy.
+        // This is crucial for VST3 popup menus to work correctly.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
 #endif
 #ifdef _WIN32
         // Process any pending Windows messages
