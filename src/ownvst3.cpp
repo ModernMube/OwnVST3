@@ -69,8 +69,7 @@ public:
                 return false;
             }
             
-            // Create and initialize host application, initialize component
-            Steinberg::Vst::HostApplication hostApp;
+            // Initialize component with persistent host application instance
             if (component->initialize(&hostApp) != kResultOk) {
                 std::cerr << "Component initialization failed" << std::endl;
                 return false;
@@ -108,9 +107,9 @@ public:
                 
                 // Initialize controller if created successfully
                 if (controller) {
-                    Steinberg::Vst::HostApplication hostApp;
+                    // Use persistent host application instance
                     controller->initialize(&hostApp);
-                    
+
                     // Connect component and controller
                     connectComponentAndController();
                 }
@@ -582,6 +581,11 @@ public:
             controllerCP->connect(componentCP);
         }
     }
+
+    // Host application instance - MUST be declared FIRST to ensure it is:
+    // 1. Constructed first (before component/controller use it)
+    // 2. Destructed LAST (after component/controller are released)
+    Steinberg::Vst::HostApplication hostApp;
 
     VST3::Hosting::Module::Ptr module = nullptr;  // VST3 module pointer
     IPluginFactory* factory = nullptr;             // Plugin factory
