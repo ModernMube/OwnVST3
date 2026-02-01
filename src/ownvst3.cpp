@@ -25,6 +25,42 @@ using namespace Steinberg::Vst;
 
 namespace OwnVst3Host {
 
+// IPlugFrame implementation for handling plugin editor window frame
+class PlugFrame : public IPlugFrame {
+public:
+    PlugFrame() : refCount(1) {}
+    virtual ~PlugFrame() {}
+
+    // IPlugFrame interface
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* newSize) override {
+        if (!view || !newSize) return kInvalidArgument;
+        // Accept the resize request - the actual window resize is handled by the host
+        return kResultOk;
+    }
+
+    // FUnknown interface
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) ||
+            FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = this;
+            addRef();
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override { return ++refCount; }
+    uint32 PLUGIN_API release() override {
+        uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<uint32> refCount;
+};
+
 class Vst3PluginImpl : public FObject {
 public:
     // Constructor: Initializes default values for sample rate and block size
@@ -172,14 +208,20 @@ public:
     // Creates and attaches the plugin's editor to a window
     bool createEditor(void* windowHandle) {
         if (!controller) return false;
-        
+
         // Create editor view
         view = controller->createView(ViewType::kEditor);
         if (!view) {
             std::cerr << "Failed to create editor" << std::endl;
             return false;
         }
-        
+
+        // Create and set plug frame for proper popup/dropdown handling
+        if (!plugFrame) {
+            plugFrame = new PlugFrame();
+        }
+        view->setFrame(plugFrame);
+
         // Try to attach to window with platform-specific type
         if (view->attached(windowHandle, kPlatformTypeHWND) != kResultOk)
         {
@@ -188,20 +230,26 @@ public:
                 if(view->attached(windowHandle, kPlatformTypeX11EmbedWindowID) != kResultOk)
                 {
                     std::cerr << "Failed to attach editor to window" << std::endl;
+                    view->setFrame(nullptr);
                     view = nullptr;
                     return false;
                 }
             }
         }
-        
+
         return true;
     }
     
     // Closes the plugin editor
     void closeEditor() {
         if (view) {
+            view->setFrame(nullptr);
             view->removed();
             view = nullptr;
+        }
+        if (plugFrame) {
+            plugFrame->release();
+            plugFrame = nullptr;
         }
     }
     
@@ -594,6 +642,7 @@ public:
     IEditController* controller = nullptr;         // Edit controller interface
     IAudioProcessor* processor = nullptr;          // Audio processor interface
     IPlugView* view = nullptr;                     // Plugin view interface
+    PlugFrame* plugFrame = nullptr;                // Plugin frame for editor window
 
     std::vector<Vst3Parameter> parameters;         // Parameter cache
     double sampleRate;                             // Current sample rate
