@@ -193,6 +193,17 @@ const char* VST3Plugin_GetPluginInfo(VST3PluginHandle handle) {
     return g_stringCache.addString(static_cast<Vst3Plugin*>(handle)->getPluginInfo());
 }
 
+void VST3Plugin_ProcessIdle(VST3PluginHandle handle) {
+    if (handle) {
+        static_cast<Vst3Plugin*>(handle)->processIdle();
+    }
+}
+
+bool VST3Plugin_IsEditorOpen(VST3PluginHandle handle) {
+    if (!handle) return false;
+    return static_cast<Vst3Plugin*>(handle)->isEditorOpen();
+}
+
 void VST3Plugin_ClearStringCache() {
     g_stringCache.clear();
 }

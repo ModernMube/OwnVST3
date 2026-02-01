@@ -12,12 +12,21 @@
 #include "base/source/fobject.h"
 
 #include <iostream>
+#include <mutex>
+#include <vector>
+#include <algorithm>
 
 #ifdef _WIN32
     #include <windows.h>
 #else
     #include <locale>
-    #include <codecvt>  
+    #include <codecvt>
+#endif
+
+#ifdef __linux__
+    #include <sys/select.h>
+    #include <unistd.h>
+    #include <time.h>
 #endif
 
 using namespace Steinberg;
@@ -25,22 +34,84 @@ using namespace Steinberg::Vst;
 
 namespace OwnVst3Host {
 
-// IPlugFrame implementation for handling plugin editor window frame
-class PlugFrame : public IPlugFrame {
+#ifdef __linux__
+// Linux-specific IRunLoop implementation
+// Required for VST3 plugins on Linux to handle timers and event handlers
+class LinuxRunLoop : public Linux::IRunLoop {
 public:
-    PlugFrame() : refCount(1) {}
-    virtual ~PlugFrame() {}
+    LinuxRunLoop() : refCount(1) {}
+    virtual ~LinuxRunLoop() {}
 
-    // IPlugFrame interface
-    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* newSize) override {
-        if (!view || !newSize) return kInvalidArgument;
-        // Accept the resize request - the actual window resize is handled by the host
+    tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* handler, Linux::FileDescriptor fd) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        eventHandlers.push_back({handler, fd});
         return kResultOk;
+    }
+
+    tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* handler) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        eventHandlers.erase(
+            std::remove_if(eventHandlers.begin(), eventHandlers.end(),
+                [handler](const EventHandlerEntry& e) { return e.handler == handler; }),
+            eventHandlers.end());
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API registerTimer(Linux::ITimerHandler* handler, Linux::TimerInterval milliseconds) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        timerHandlers.push_back({handler, milliseconds, 0});
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* handler) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        timerHandlers.erase(
+            std::remove_if(timerHandlers.begin(), timerHandlers.end(),
+                [handler](const TimerHandlerEntry& e) { return e.handler == handler; }),
+            timerHandlers.end());
+        return kResultOk;
+    }
+
+    // Process events and timers - should be called periodically from UI thread
+    void processEvents(uint64 currentTimeMs) {
+        std::lock_guard<std::mutex> lock(mutex);
+
+        // Process file descriptor events
+        if (!eventHandlers.empty()) {
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            int maxfd = 0;
+            for (const auto& entry : eventHandlers) {
+                FD_SET(entry.fd, &readfds);
+                if (entry.fd > maxfd) maxfd = entry.fd;
+            }
+
+            struct timeval tv = {0, 0}; // Non-blocking
+            if (select(maxfd + 1, &readfds, nullptr, nullptr, &tv) > 0) {
+                for (const auto& entry : eventHandlers) {
+                    if (FD_ISSET(entry.fd, &readfds)) {
+                        entry.handler->onFDIsSet(entry.fd);
+                    }
+                }
+            }
+        }
+
+        // Process timers
+        for (auto& entry : timerHandlers) {
+            if (currentTimeMs - entry.lastCallTime >= entry.interval) {
+                entry.handler->onTimer();
+                entry.lastCallTime = currentTimeMs;
+            }
+        }
     }
 
     // FUnknown interface
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) ||
+        if (FUnknownPrivate::iidEqual(iid, Linux::IRunLoop::iid) ||
             FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
             *obj = this;
             addRef();
@@ -58,7 +129,104 @@ public:
     }
 
 private:
+    struct EventHandlerEntry {
+        Linux::IEventHandler* handler;
+        Linux::FileDescriptor fd;
+    };
+
+    struct TimerHandlerEntry {
+        Linux::ITimerHandler* handler;
+        Linux::TimerInterval interval;
+        uint64 lastCallTime;
+    };
+
+    std::vector<EventHandlerEntry> eventHandlers;
+    std::vector<TimerHandlerEntry> timerHandlers;
+    std::mutex mutex;
     std::atomic<uint32> refCount;
+};
+#endif
+
+// IPlugFrame implementation for handling plugin editor window frame
+// Also implements IRunLoop on Linux for proper event handling
+class PlugFrame : public IPlugFrame
+#ifdef __linux__
+    , public Linux::IRunLoop
+#endif
+{
+public:
+    PlugFrame() : refCount(1) {
+#ifdef __linux__
+        runLoop = new LinuxRunLoop();
+#endif
+    }
+    virtual ~PlugFrame() {
+#ifdef __linux__
+        if (runLoop) runLoop->release();
+#endif
+    }
+
+    // IPlugFrame interface
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* newSize) override {
+        if (!view || !newSize) return kInvalidArgument;
+        // Accept the resize request - the actual window resize is handled by the host
+        return kResultOk;
+    }
+
+#ifdef __linux__
+    // IRunLoop interface (Linux only)
+    tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* handler, Linux::FileDescriptor fd) override {
+        return runLoop ? runLoop->registerEventHandler(handler, fd) : kResultFalse;
+    }
+
+    tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* handler) override {
+        return runLoop ? runLoop->unregisterEventHandler(handler) : kResultFalse;
+    }
+
+    tresult PLUGIN_API registerTimer(Linux::ITimerHandler* handler, Linux::TimerInterval milliseconds) override {
+        return runLoop ? runLoop->registerTimer(handler, milliseconds) : kResultFalse;
+    }
+
+    tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* handler) override {
+        return runLoop ? runLoop->unregisterTimer(handler) : kResultFalse;
+    }
+
+    void processEvents(uint64 currentTimeMs) {
+        if (runLoop) runLoop->processEvents(currentTimeMs);
+    }
+#endif
+
+    // FUnknown interface
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) ||
+            FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = this;
+            addRef();
+            return kResultOk;
+        }
+#ifdef __linux__
+        if (FUnknownPrivate::iidEqual(iid, Linux::IRunLoop::iid)) {
+            *obj = static_cast<Linux::IRunLoop*>(this);
+            addRef();
+            return kResultOk;
+        }
+#endif
+        *obj = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override { return ++refCount; }
+    uint32 PLUGIN_API release() override {
+        uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<uint32> refCount;
+#ifdef __linux__
+    LinuxRunLoop* runLoop = nullptr;
+#endif
 };
 
 class Vst3PluginImpl : public FObject {
@@ -553,14 +721,14 @@ public:
         std::string info;
         info += "Name: " + getName() + "\n";
         info += "Vendor: " + getVendor() + "\n";
-        
+
         // Number of input/output buses
         if (component) {
             int numInputs = component->getBusCount(kAudio, kInput);
             int numOutputs = component->getBusCount(kAudio, kOutput);
-            info += "Audio buses: " + std::to_string(numInputs) + " input(s), " + 
+            info += "Audio buses: " + std::to_string(numInputs) + " input(s), " +
                     std::to_string(numOutputs) + " output(s)\n";
-                    
+
             int numEventInputs = component->getBusCount(kEvent, kInput);
             if (numEventInputs > 0) {
                 info += "MIDI input: Yes\n";
@@ -568,11 +736,41 @@ public:
                 info += "MIDI input: No\n";
             }
         }
-        
+
         return info;
     }
 
-    
+    // Process idle events - should be called periodically from UI thread
+    // This is essential for proper popup menu handling on all platforms
+    void processIdle() {
+#ifdef __linux__
+        // On Linux, process registered timers and event handlers
+        if (plugFrame) {
+            // Get current time in milliseconds
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64 currentTimeMs = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            plugFrame->processEvents(currentTimeMs);
+        }
+#endif
+        // On Windows and macOS, the native message pump handles this
+        // but we can still pump messages if needed
+#ifdef _WIN32
+        // Process any pending Windows messages
+        MSG msg;
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+#endif
+    }
+
+    // Check if editor is currently open
+    bool isEditorOpen() const {
+        return view != nullptr;
+    }
+
+
     private:
     // Finds component and controller IDs from the factory
     bool findComponentAndControllerIDs(IPluginFactory* factory, FUID& componentID, 
@@ -778,6 +976,14 @@ public:
 
     std::string Vst3Plugin::getPluginInfo() {
         return impl->getPluginInfo();
+    }
+
+    void Vst3Plugin::processIdle() {
+        impl->processIdle();
+    }
+
+    bool Vst3Plugin::isEditorOpen() {
+        return impl->isEditorOpen();
     }
 
 } // namespace OwnVst3Host
