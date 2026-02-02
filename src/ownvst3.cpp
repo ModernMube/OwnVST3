@@ -15,6 +15,9 @@
 #include <mutex>
 #include <vector>
 #include <algorithm>
+#include <atomic>
+#include <array>
+#include <map>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -25,18 +28,79 @@
 
 #ifdef __linux__
     #include <sys/select.h>
+    #include <poll.h>
     #include <unistd.h>
     #include <time.h>
 #endif
 
 #ifdef __APPLE__
     #include <CoreFoundation/CoreFoundation.h>
+
+    // macOS timer interval for idle processing (~50 Hz)
+    static constexpr CFTimeInterval MACOS_IDLE_TIMER_INTERVAL = 0.02;
 #endif
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 namespace OwnVst3Host {
+
+// Thread-safe parameter cache using atomic operations
+// This eliminates mutex contention between audio thread and UI thread
+static constexpr size_t MAX_CACHED_PARAMETERS = 256;
+
+struct AtomicParameterValue {
+    std::atomic<double> value{0.0};
+    std::atomic<bool> changed{false};
+    std::atomic<uint32_t> id{0};
+};
+
+// Lock-free parameter change queue for thread-safe communication
+// Audio thread reads, UI/background thread writes
+class ThreadSafeParameterCache {
+public:
+    ThreadSafeParameterCache() {
+        for (size_t i = 0; i < MAX_CACHED_PARAMETERS; ++i) {
+            cache[i].value.store(0.0, std::memory_order_relaxed);
+            cache[i].changed.store(false, std::memory_order_relaxed);
+            cache[i].id.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    // Called from UI/background thread - sets parameter value atomically
+    void setParameter(uint32_t paramId, double value) {
+        size_t index = paramId % MAX_CACHED_PARAMETERS;
+        cache[index].id.store(paramId, std::memory_order_relaxed);
+        cache[index].value.store(value, std::memory_order_relaxed);
+        cache[index].changed.store(true, std::memory_order_release);
+    }
+
+    // Called from audio thread - reads and clears changed parameters
+    // Returns true if parameter was changed, value is set to the new value
+    bool getAndClearIfChanged(uint32_t paramId, double& value) {
+        size_t index = paramId % MAX_CACHED_PARAMETERS;
+        if (cache[index].id.load(std::memory_order_relaxed) == paramId &&
+            cache[index].changed.load(std::memory_order_acquire)) {
+            value = cache[index].value.load(std::memory_order_relaxed);
+            cache[index].changed.store(false, std::memory_order_release);
+            return true;
+        }
+        return false;
+    }
+
+    // Check if any parameter has pending changes
+    bool hasChanges() const {
+        for (size_t i = 0; i < MAX_CACHED_PARAMETERS; ++i) {
+            if (cache[i].changed.load(std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    std::array<AtomicParameterValue, MAX_CACHED_PARAMETERS> cache;
+};
 
 #ifdef __linux__
 // Linux-specific IRunLoop implementation
@@ -81,24 +145,30 @@ public:
     }
 
     // Process events and timers - should be called periodically from UI thread
+    // Uses poll() instead of select() for better scalability and to avoid
+    // blocking issues with dropdown menus
     void processEvents(uint64 currentTimeMs) {
         std::lock_guard<std::mutex> lock(mutex);
 
-        // Process file descriptor events
+        // Process file descriptor events using poll() for better performance
         if (!eventHandlers.empty()) {
-            fd_set readfds;
-            FD_ZERO(&readfds);
-            int maxfd = 0;
+            std::vector<struct pollfd> pollfds;
+            pollfds.reserve(eventHandlers.size());
+
             for (const auto& entry : eventHandlers) {
-                FD_SET(entry.fd, &readfds);
-                if (entry.fd > maxfd) maxfd = entry.fd;
+                struct pollfd pfd;
+                pfd.fd = entry.fd;
+                pfd.events = POLLIN;
+                pfd.revents = 0;
+                pollfds.push_back(pfd);
             }
 
-            struct timeval tv = {0, 0}; // Non-blocking
-            if (select(maxfd + 1, &readfds, nullptr, nullptr, &tv) > 0) {
-                for (const auto& entry : eventHandlers) {
-                    if (FD_ISSET(entry.fd, &readfds)) {
-                        entry.handler->onFDIsSet(entry.fd);
+            // Non-blocking poll with 0 timeout
+            int result = poll(pollfds.data(), pollfds.size(), 0);
+            if (result > 0) {
+                for (size_t i = 0; i < pollfds.size(); ++i) {
+                    if (pollfds[i].revents & POLLIN) {
+                        eventHandlers[i].handler->onFDIsSet(eventHandlers[i].fd);
                     }
                 }
             }
@@ -149,6 +219,20 @@ private:
     std::mutex mutex;
     std::atomic<uint32> refCount;
 };
+#endif
+
+#ifdef _WIN32
+// Windows timer constants for idle processing
+static constexpr UINT_PTR VST3_IDLE_TIMER_ID = 1001;
+static constexpr UINT VST3_IDLE_TIMER_INTERVAL_MS = 20; // ~50 Hz refresh rate
+
+// Forward declaration for timer callback
+class Vst3PluginImpl;
+static std::map<HWND, Vst3PluginImpl*> g_windowToPluginMap;
+static std::mutex g_windowMapMutex;
+
+// Timer callback function - processes idle events during modal loops (dropdown menus)
+static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 #endif
 
 // IPlugFrame implementation for handling plugin editor window frame
@@ -409,11 +493,72 @@ public:
             }
         }
 
+#ifdef _WIN32
+        // Start Windows timer for idle processing with callback
+        // This ensures processIdle is called even during modal dropdown menus
+        // The callback function (Vst3IdleTimerProc) is used instead of WM_TIMER messages
+        // because modal loops process timer callbacks but may not dispatch WM_TIMER to our window
+        editorWindowHandle = static_cast<HWND>(windowHandle);
+        if (editorWindowHandle) {
+            {
+                std::lock_guard<std::mutex> lock(g_windowMapMutex);
+                g_windowToPluginMap[editorWindowHandle] = this;
+            }
+            SetTimer(editorWindowHandle, VST3_IDLE_TIMER_ID, VST3_IDLE_TIMER_INTERVAL_MS, Vst3IdleTimerProc);
+        }
+#endif
+
+#ifdef __APPLE__
+        // Start macOS CFRunLoopTimer for idle processing
+        // This ensures events are processed even during modal dropdown menus
+        if (!idleTimer) {
+            CFRunLoopTimerContext context = {0, this, nullptr, nullptr, nullptr};
+            idleTimer = CFRunLoopTimerCreate(
+                kCFAllocatorDefault,
+                CFAbsoluteTimeGetCurrent() + MACOS_IDLE_TIMER_INTERVAL,
+                MACOS_IDLE_TIMER_INTERVAL,  // Repeating interval
+                0,                           // flags
+                0,                           // order
+                [](CFRunLoopTimerRef timer, void* info) {
+                    auto* self = static_cast<Vst3PluginImpl*>(info);
+                    if (self) {
+                        self->processIdle();
+                    }
+                },
+                &context
+            );
+            if (idleTimer) {
+                CFRunLoopAddTimer(CFRunLoopGetMain(), idleTimer, kCFRunLoopCommonModes);
+            }
+        }
+#endif
+
         return true;
     }
     
     // Closes the plugin editor
     void closeEditor() {
+#ifdef _WIN32
+        // Stop Windows timer before closing editor
+        if (editorWindowHandle) {
+            KillTimer(editorWindowHandle, VST3_IDLE_TIMER_ID);
+            {
+                std::lock_guard<std::mutex> lock(g_windowMapMutex);
+                g_windowToPluginMap.erase(editorWindowHandle);
+            }
+            editorWindowHandle = nullptr;
+        }
+#endif
+
+#ifdef __APPLE__
+        // Stop macOS timer before closing editor
+        if (idleTimer) {
+            CFRunLoopTimerInvalidate(idleTimer);
+            CFRelease(idleTimer);
+            idleTimer = nullptr;
+        }
+#endif
+
         if (view) {
             view->setFrame(nullptr);
             view->removed();
@@ -537,11 +682,22 @@ public:
     }
     
     // Sets a parameter value by ID
+    // Thread-safe: writes to atomic cache for later processing by audio thread
     bool setParameter(int paramId, double value) {
         if (!controller) return false;
-        
+
+        // Write to atomic cache - this is lock-free and safe from any thread
+        atomicParamCache.setParameter(static_cast<uint32_t>(paramId), value);
+
+        // Also update controller directly for immediate UI feedback
         controller->setParamNormalized(paramId, value);
         return true;
+    }
+
+    // Thread-safe parameter setter for background threads
+    // Only writes to atomic cache, does not touch controller
+    void setParameterFromBackgroundThread(int paramId, double value) {
+        atomicParamCache.setParameter(static_cast<uint32_t>(paramId), value);
     }
     
     // Gets a parameter value by ID
@@ -552,41 +708,59 @@ public:
     }
     
     // Processes audio through the plugin
+    // Thread-safe: reads parameter changes from atomic cache
     bool processAudio(AudioBuffer& buffer) {
         if (!processor) return false;
-        
+
         Steinberg::Vst::ProcessData data;
         data.numSamples = buffer.numSamples;
-        
+
         // Setup audio data
         Steinberg::Vst::AudioBusBuffers inputBuffers;
         inputBuffers.numChannels = buffer.numChannels;
         inputBuffers.channelBuffers32 = buffer.inputs;
         inputBuffers.silenceFlags = 0;
-        
+
         Steinberg::Vst::AudioBusBuffers outputBuffers;
         outputBuffers.numChannels = buffer.numChannels;
         outputBuffers.channelBuffers32 = buffer.outputs;
         outputBuffers.silenceFlags = 0;
-        
+
         data.inputs = &inputBuffers;
         data.outputs = &outputBuffers;
         data.numInputs = 1;
         data.numOutputs = 1;
-        
+
         // Initialize missing fields
         data.processMode = Steinberg::Vst::ProcessModes::kRealtime;
         data.symbolicSampleSize = Steinberg::Vst::SymbolicSampleSizes::kSample32;
-        data.processContext = nullptr; // Or provide a valid ProcessContext
-        data.inputParameterChanges = nullptr; // Or provide valid IParameterChanges
-        data.outputParameterChanges = nullptr; // Or provide valid IParameterChanges
-        
+        data.processContext = nullptr;
+
+        // Process parameter changes from atomic cache (lock-free)
+        ParameterChanges inputParamChanges;
+        if (atomicParamCache.hasChanges()) {
+            for (const auto& param : parameters) {
+                double newValue;
+                if (atomicParamCache.getAndClearIfChanged(param.id, newValue)) {
+                    int32 index = 0;
+                    IParamValueQueue* queue = inputParamChanges.addParameterData(param.id, index);
+                    if (queue) {
+                        int32 pointIndex = 0;
+                        queue->addPoint(0, newValue, pointIndex);
+                    }
+                }
+            }
+        }
+
+        data.inputParameterChanges = &inputParamChanges;
+        data.outputParameterChanges = nullptr;
+
         // Process audio
         if (processor->process(data) != Steinberg::kResultOk) {
             std::cerr << "Error during audio processing" << std::endl;
             return false;
         }
-        
+
         return true;
     }
     
@@ -851,8 +1025,17 @@ public:
     PlugFrame* plugFrame = nullptr;                // Plugin frame for editor window
 
     std::vector<Vst3Parameter> parameters;         // Parameter cache
+    ThreadSafeParameterCache atomicParamCache;     // Thread-safe atomic parameter cache
     double sampleRate;                             // Current sample rate
     int blockSize;                                 // Current block size
+
+#ifdef _WIN32
+    HWND editorWindowHandle = nullptr;             // Windows editor window handle for timer
+#endif
+
+#ifdef __APPLE__
+    CFRunLoopTimerRef idleTimer = nullptr;         // macOS idle timer for event processing
+#endif
 
     #ifdef _WIN32
     // Converts TCHAR to UTF-8 string
@@ -912,6 +1095,29 @@ public:
         }
     #endif
     };
+
+#ifdef _WIN32
+// Windows timer callback implementation
+// Called automatically during modal loops (dropdown menus) to keep UI responsive
+static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
+    (void)uMsg;
+    (void)idEvent;
+    (void)dwTime;
+
+    Vst3PluginImpl* plugin = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_windowMapMutex);
+        auto it = g_windowToPluginMap.find(hwnd);
+        if (it != g_windowToPluginMap.end()) {
+            plugin = it->second;
+        }
+    }
+
+    if (plugin) {
+        plugin->processIdle();
+    }
+}
+#endif
 
     // Vst3Plugin implementation - Add OWN_VST3_HOST_API to fix the inconsistent dll linkage warning
     Vst3Plugin::Vst3Plugin() : impl(new Vst3PluginImpl()) {}
