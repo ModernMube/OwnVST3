@@ -169,16 +169,22 @@ if(APPLE)
     set_source_files_properties(
         ${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm
         ${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3_mac_helper.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc"
     )
 endif()
 
 # Source files
-set(SOURCES 
+set(SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3_wrapper.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3_test.cpp
 )
+
+# macOS Objective-C++ helper for child window management
+if(APPLE)
+    list(APPEND SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/ownvst3_mac_helper.mm)
+endif()
 
 # Header files
 set(HEADERS

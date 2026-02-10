@@ -38,6 +38,9 @@
 
     // macOS timer interval for idle processing (~50 Hz)
     static constexpr CFTimeInterval MACOS_IDLE_TIMER_INTERVAL = 0.02;
+
+    // Defined in ownvst3_mac_helper.mm - closes child windows (popups/dropdowns)
+    extern "C" void OwnVst3_CloseChildWindows(void* nsViewHandle);
 #endif
 
 using namespace Steinberg;
@@ -431,10 +434,38 @@ public:
 
     void unloadPlugin() {
         try {
+#ifdef __APPLE__
+            // Clean up child windows (popups/dropdowns) before removing the view
+            if (editorNSViewHandle) {
+                OwnVst3_CloseChildWindows(editorNSViewHandle);
+                editorNSViewHandle = nullptr;
+            }
+            // Stop idle timer if still running
+            if (idleTimer) {
+                CFRunLoopTimerInvalidate(idleTimer);
+                CFRelease(idleTimer);
+                idleTimer = nullptr;
+            }
+#endif
+#ifdef _WIN32
+            if (editorWindowHandle) {
+                KillTimer(editorWindowHandle, VST3_IDLE_TIMER_ID);
+                {
+                    std::lock_guard<std::mutex> lock(g_windowMapMutex);
+                    g_windowToPluginMap.erase(editorWindowHandle);
+                }
+                editorWindowHandle = nullptr;
+            }
+#endif
             // 1. Távolítsuk el a nézetet
             if (view) {
+                view->setFrame(nullptr);
                 view->removed();
                 view = nullptr;
+            }
+            if (plugFrame) {
+                plugFrame->release();
+                plugFrame = nullptr;
             }
             
             // 2. Deaktiválás, ha még aktív
@@ -509,6 +540,9 @@ public:
 #endif
 
 #ifdef __APPLE__
+        // Store the NSView handle for child window cleanup on close
+        editorNSViewHandle = windowHandle;
+
         // Start macOS CFRunLoopTimer for idle processing
         // This ensures events are processed even during modal dropdown menus
         if (!idleTimer) {
@@ -556,6 +590,14 @@ public:
             CFRunLoopTimerInvalidate(idleTimer);
             CFRelease(idleTimer);
             idleTimer = nullptr;
+        }
+
+        // Close any child windows (popups, dropdowns) before removing the view.
+        // VST plugins create child NSWindows for menus that can become orphaned
+        // if the editor is closed while a dropdown is open.
+        if (editorNSViewHandle) {
+            OwnVst3_CloseChildWindows(editorNSViewHandle);
+            editorNSViewHandle = nullptr;
         }
 #endif
 
@@ -932,10 +974,14 @@ public:
         }
 #endif
 #ifdef __APPLE__
-        // On macOS, explicitly pump the run loop to ensure events are processed
-        // even when a modal loop might be active or the main thread is busy.
-        // This is crucial for VST3 popup menus to work correctly.
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+        // On macOS, idle processing is handled by the CFRunLoopTimer created in createEditor().
+        // The timer is registered with kCFRunLoopCommonModes, which ensures it fires
+        // during modal tracking loops (dropdown menus, popup menus, etc.).
+        // We intentionally do NOT call CFRunLoopRunInMode() here because:
+        // 1. Re-entering the run loop from within a timer callback causes deadlocks
+        //    during modal tracking (dropdown/popup menus freeze the editor)
+        // 2. kCFRunLoopDefaultMode would miss NSEventTrackingRunLoopMode events anyway
+        // 3. When called from a background thread, it would pump the wrong run loop
 #endif
 #ifdef _WIN32
         // Process any pending Windows messages
@@ -1035,6 +1081,7 @@ public:
 
 #ifdef __APPLE__
     CFRunLoopTimerRef idleTimer = nullptr;         // macOS idle timer for event processing
+    void* editorNSViewHandle = nullptr;            // NSView handle for child window cleanup
 #endif
 
     #ifdef _WIN32
