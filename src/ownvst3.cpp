@@ -39,8 +39,9 @@
     // macOS timer interval for idle processing (~50 Hz)
     static constexpr CFTimeInterval MACOS_IDLE_TIMER_INTERVAL = 0.02;
 
-    // Defined in ownvst3_mac_helper.mm - closes child windows (popups/dropdowns)
+    // Defined in ownvst3_mac_helper.mm
     extern "C" void OwnVst3_CloseChildWindows(void* nsViewHandle);
+    extern "C" void OwnVst3_ProcessIdleMacOS(void);
 #endif
 
 using namespace Steinberg;
@@ -509,19 +510,25 @@ public:
         }
         view->setFrame(plugFrame);
 
-        // Try to attach to window with platform-specific type
-        if (view->attached(windowHandle, kPlatformTypeHWND) != kResultOk)
+        // Attach to window using the correct platform type.
+        // IMPORTANT: We must use compile-time detection instead of trying all types
+        // sequentially, because a failed attached() call with the wrong platform type
+        // can leave some plugins in an inconsistent internal state.
+#ifdef _WIN32
+        const auto platformType = kPlatformTypeHWND;
+#elif defined(__APPLE__)
+        const auto platformType = kPlatformTypeNSView;
+#elif defined(__linux__)
+        const auto platformType = kPlatformTypeX11EmbedWindowID;
+#else
+        #error "Unsupported platform"
+#endif
+        if (view->attached(windowHandle, platformType) != kResultOk)
         {
-            if(view->attached(windowHandle, kPlatformTypeNSView) != kResultOk)
-            {
-                if(view->attached(windowHandle, kPlatformTypeX11EmbedWindowID) != kResultOk)
-                {
-                    std::cerr << "Failed to attach editor to window" << std::endl;
-                    view->setFrame(nullptr);
-                    view = nullptr;
-                    return false;
-                }
-            }
+            std::cerr << "Failed to attach editor to window" << std::endl;
+            view->setFrame(nullptr);
+            view = nullptr;
+            return false;
         }
 
 #ifdef _WIN32
@@ -974,14 +981,12 @@ public:
         }
 #endif
 #ifdef __APPLE__
-        // On macOS, idle processing is handled by the CFRunLoopTimer created in createEditor().
-        // The timer is registered with kCFRunLoopCommonModes, which ensures it fires
-        // during modal tracking loops (dropdown menus, popup menus, etc.).
-        // We intentionally do NOT call CFRunLoopRunInMode() here because:
-        // 1. Re-entering the run loop from within a timer callback causes deadlocks
-        //    during modal tracking (dropdown/popup menus freeze the editor)
-        // 2. kCFRunLoopDefaultMode would miss NSEventTrackingRunLoopMode events anyway
-        // 3. When called from a background thread, it would pump the wrong run loop
+        // Process events using the Objective-C helper (ownvst3_mac_helper.mm).
+        // This helper:
+        // - Only runs on the main thread (safe when called from C# ThreadPool)
+        // - Uses the CURRENT run loop mode (works during modal tracking/dropdown menus)
+        // - Properly handles NSEventTrackingRunLoopMode for popup menus
+        OwnVst3_ProcessIdleMacOS();
 #endif
 #ifdef _WIN32
         // Process any pending Windows messages
