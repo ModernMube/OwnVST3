@@ -14,10 +14,14 @@ extern "C" void OwnVst3_CloseChildWindows(void* nsViewHandle) {
 
     @autoreleasepool {
         // 1. Cancel any open menu tracking (NSMenu-based dropdowns).
-        //    This is a class method that dismisses ALL currently tracking menus.
-        //    It must be called BEFORE view->removed() to ensure the menu's
+        //    cancelTrackingWithoutAnimation is an instance method, so we
+        //    find the main menu and any contextual menus to cancel them.
+        //    This must be called BEFORE view->removed() to ensure the menu's
         //    modal tracking loop exits cleanly.
-        [NSMenu cancelTrackingWithoutAnimation];
+        NSMenu* mainMenu = [[NSApplication sharedApplication] mainMenu];
+        if (mainMenu) {
+            [mainMenu cancelTrackingWithoutAnimation];
+        }
 
         NSView* view = (__bridge NSView*)nsViewHandle;
         NSWindow* editorWindow = [view window];
