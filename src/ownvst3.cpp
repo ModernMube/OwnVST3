@@ -321,6 +321,53 @@ private:
 #endif
 };
 
+// IComponentHandler implementation – required by professional plugins (e.g. BiasFX2)
+// Without this, paramétermódosításkor null pointer dereference / freeze occurs.
+class OwnComponentHandler : public Steinberg::Vst::IComponentHandler {
+public:
+    // IComponentHandler
+    Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID /*id*/) override {
+        return Steinberg::kResultOk;
+    }
+
+    Steinberg::tresult PLUGIN_API performEdit(
+        Steinberg::Vst::ParamID /*id*/,
+        Steinberg::Vst::ParamValue /*valueNormalized*/) override
+    {
+        return Steinberg::kResultOk;
+    }
+
+    Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID /*id*/) override {
+        return Steinberg::kResultOk;
+    }
+
+    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 /*flags*/) override {
+        return Steinberg::kResultOk;
+    }
+
+    // FUnknown
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
+        if (Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::Vst::IComponentHandler::iid) ||
+            Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::FUnknown::iid)) {
+            *obj = this;
+            addRef();
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+
+    Steinberg::uint32 PLUGIN_API addRef() override { return ++refCount; }
+    Steinberg::uint32 PLUGIN_API release() override {
+        Steinberg::uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<Steinberg::uint32> refCount{1};
+};
+
 class Vst3PluginImpl : public FObject {
 public:
     // Constructor: Initializes default values for sample rate and block size
@@ -370,13 +417,7 @@ public:
                 std::cerr << "Component initialization failed" << std::endl;
                 return false;
             }
-            
-            // Activate component
-            if (component->setActive(true) != kResultOk) {
-                std::cerr << "Component activation failed" << std::endl;
-                return false;
-            }
-            
+
             // Create controller instance
             if (controllerID.isValid()) {
                 result = factory->createInstance(controllerID, IEditController::iid, 
@@ -406,6 +447,14 @@ public:
                     // Use persistent host application instance
                     controller->initialize(&hostApp);
 
+                    // Register component handler – required by professional plugins (e.g. BiasFX2)
+                    // Without this, null pointer dereference occurs during parameter changes
+                    componentHandler = new OwnComponentHandler();
+                    componentHandler->addRef();
+                    if (controller->setComponentHandler(componentHandler) != kResultOk) {
+                        std::cerr << "setComponentHandler failed (non-fatal)" << std::endl;
+                    }
+
                     // Connect component and controller
                     connectComponentAndController();
                 }
@@ -418,9 +467,16 @@ public:
                 return false;
             }
             
-            // Setup processing
+            // Setup processing (includes setBusArrangement + activateBus)
             setupProcessing();
-            
+
+            // Activate component AFTER setupProcessing – VST3 spec requirement
+            if (component->setActive(true) != kResultOk) {
+                std::cerr << "Component activation failed" << std::endl;
+                return false;
+            }
+            isActive = true;
+
             // Update parameters
             updateParameters();
             
@@ -470,16 +526,23 @@ public:
             }
             
             // 2. Deaktiválás, ha még aktív
-            if (component) {
+            if (component && isActive) {
                 try {
                     component->setActive(false);
                 } catch (...) {}
+                isActive = false;
             }
-            
-            // 3. Minden referenciát null-ra állítunk, de nem hívunk terminate-et
+
+            // 3. ComponentHandler felszabadítása
+            if (componentHandler) {
+                componentHandler->release();
+                componentHandler = nullptr;
+            }
+
+            // 4. Minden referenciát null-ra állítunk, de nem hívunk terminate-et
             view = nullptr;
             processor = nullptr;
-            
+
             // Fontos: Elengedjük a referenciákat, de nem hívunk terminate-et
             controller = nullptr;
             component = nullptr;
@@ -672,32 +735,71 @@ public:
     // Sets up audio processing with current settings
     bool setupProcessing() {
         if (!processor) return false;
-        
+
+        // --- Bus arrangement negotiation (VST3 spec requirement) ---
+        // Without this the plugin uses its own default channel count which may
+        // differ from what the host sends, causing silence or incorrect processing.
+        int numInputBuses  = component->getBusCount(kAudio, kInput);
+        int numOutputBuses = component->getBusCount(kAudio, kOutput);
+
+        if (numInputBuses > 0 || numOutputBuses > 0) {
+            SpeakerArrangement stereo = SpeakerArr::kStereo;
+            SpeakerArrangement mono   = SpeakerArr::kMono;
+
+            std::vector<SpeakerArrangement> inputArr(numInputBuses,  stereo);
+            std::vector<SpeakerArrangement> outputArr(numOutputBuses, stereo);
+
+            tresult busResult = processor->setBusArrangement(
+                inputArr.data(),  numInputBuses,
+                outputArr.data(), numOutputBuses);
+
+            if (busResult != kResultOk) {
+                // Stereo failed – try mono inputs with stereo outputs
+                std::fill(inputArr.begin(), inputArr.end(), mono);
+                processor->setBusArrangement(
+                    inputArr.data(),  numInputBuses,
+                    outputArr.data(), numOutputBuses);
+                // Continue even if this also fails; use plugin default arrangement
+            }
+        }
+
+        // Query the actually accepted channel counts and cache them
+        actualInputChannels  = 0;
+        actualOutputChannels = 0;
+        for (int i = 0; i < numInputBuses; i++) {
+            BusInfo info = {};
+            if (component->getBusInfo(kAudio, kInput, i, info) == kResultOk)
+                actualInputChannels += info.channelCount;
+        }
+        for (int i = 0; i < numOutputBuses; i++) {
+            BusInfo info = {};
+            if (component->getBusInfo(kAudio, kOutput, i, info) == kResultOk)
+                actualOutputChannels += info.channelCount;
+        }
+        // --- Bus arrangement negotiation end ---
+
         // Initialize ProcessSetup structure
         ProcessSetup setup;
         setup.processMode = kRealtime;
         setup.symbolicSampleSize = kSample32;
         setup.maxSamplesPerBlock = blockSize;
         setup.sampleRate = sampleRate;
-        
+
         // Setup processor
         if (processor->setupProcessing(setup) != kResultOk) {
             std::cerr << "Failed to setup processing" << std::endl;
             return false;
         }
-        
+
         // Activate buses
-        int numInputs = component->getBusCount(kAudio, kInput);
-        int numOutputs = component->getBusCount(kAudio, kOutput);
-        
-        for (int i = 0; i < numInputs; i++) {
+        for (int i = 0; i < numInputBuses; i++) {
             component->activateBus(kAudio, kInput, i, true);
         }
-        
-        for (int i = 0; i < numOutputs; i++) {
+
+        for (int i = 0; i < numOutputBuses; i++) {
             component->activateBus(kAudio, kOutput, i, true);
         }
-        
+
         return true;
     }
     
@@ -760,6 +862,7 @@ public:
     // Thread-safe: reads parameter changes from atomic cache
     bool processAudio(AudioBuffer& buffer) {
         if (!processor) return false;
+        if (!isActive) return false;
 
         Steinberg::Vst::ProcessData data;
         data.numSamples = buffer.numSamples;
@@ -783,7 +886,21 @@ public:
         // Initialize missing fields
         data.processMode = Steinberg::Vst::ProcessModes::kRealtime;
         data.symbolicSampleSize = Steinberg::Vst::SymbolicSampleSizes::kSample32;
-        data.processContext = nullptr;
+
+        // ProcessContext – required for tempo-synced effects (delay, tremolo, etc.)
+        // Without this some plugins crash or produce silence.
+        ProcessContext ctx = {};
+        ctx.state = ProcessContext::kTempoValid
+                  | ProcessContext::kTimeSigValid
+                  | ProcessContext::kProjectTimeMusicValid;
+        if (isTransportPlaying)
+            ctx.state |= ProcessContext::kPlaying;
+        ctx.sampleRate          = sampleRate;
+        ctx.projectTimeSamples  = static_cast<int64>(currentSamplePos);
+        ctx.tempo               = currentBpm;
+        ctx.timeSigNumerator    = 4;
+        ctx.timeSigDenominator  = 4;
+        data.processContext = &ctx;
 
         // Process parameter changes from atomic cache (lock-free)
         ParameterChanges inputParamChanges;
@@ -802,12 +919,34 @@ public:
         }
 
         data.inputParameterChanges = &inputParamChanges;
-        data.outputParameterChanges = nullptr;
+
+        // Capture output parameter changes (e.g. automation read-back from plugin)
+        ParameterChanges outputParamChanges;
+        data.outputParameterChanges = &outputParamChanges;
 
         // Process audio
         if (processor->process(data) != Steinberg::kResultOk) {
             std::cerr << "Error during audio processing" << std::endl;
             return false;
+        }
+
+        // Advance transport position
+        currentSamplePos += data.numSamples;
+
+        // Store output parameter changes into atomic cache so C# side can read them
+        int numQueues = outputParamChanges.getParameterCount();
+        for (int i = 0; i < numQueues; i++) {
+            IParamValueQueue* queue = outputParamChanges.getParameterData(i);
+            if (!queue) continue;
+            ParamID id = queue->getParameterId();
+            int numPoints = queue->getPointCount();
+            if (numPoints > 0) {
+                int32 pointOffset;
+                ParamValue value;
+                if (queue->getPoint(numPoints - 1, pointOffset, value) == kResultOk) {
+                    atomicParamCache.setParameter(id, value);
+                }
+            }
         }
 
         return true;
@@ -1003,6 +1142,20 @@ public:
         return view != nullptr;
     }
 
+    // Returns the actual input channel count negotiated by setBusArrangement
+    int getActualInputChannels() const { return actualInputChannels; }
+
+    // Returns the actual output channel count negotiated by setBusArrangement
+    int getActualOutputChannels() const { return actualOutputChannels; }
+
+    // Sets the playback tempo (BPM) used in ProcessContext
+    void setTempo(double bpm) { currentBpm = bpm; }
+
+    // Sets transport playing state used in ProcessContext
+    void setTransportState(bool playing) { isTransportPlaying = playing; }
+
+    // Resets the transport sample position counter to zero
+    void resetTransportPosition() { currentSamplePos = 0.0; }
 
     private:
     // Finds component and controller IDs from the factory
@@ -1079,6 +1232,18 @@ public:
     ThreadSafeParameterCache atomicParamCache;     // Thread-safe atomic parameter cache
     double sampleRate;                             // Current sample rate
     int blockSize;                                 // Current block size
+
+    OwnComponentHandler* componentHandler = nullptr; // IComponentHandler for plugin callbacks
+    bool isActive = false;                           // True after setActive(true) succeeds
+
+    // Bus channel counts negotiated by setBusArrangement
+    int actualInputChannels  = 2;
+    int actualOutputChannels = 2;
+
+    // Transport / tempo state for ProcessContext
+    double currentBpm         = 120.0;
+    double currentSamplePos   = 0.0;
+    bool   isTransportPlaying = false;
 
 #ifdef _WIN32
     HWND editorWindowHandle = nullptr;             // Windows editor window handle for timer
@@ -1250,6 +1415,26 @@ static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, D
 
     bool Vst3Plugin::isEditorOpen() {
         return impl->isEditorOpen();
+    }
+
+    int Vst3Plugin::getActualInputChannels() {
+        return impl->getActualInputChannels();
+    }
+
+    int Vst3Plugin::getActualOutputChannels() {
+        return impl->getActualOutputChannels();
+    }
+
+    void Vst3Plugin::setTempo(double bpm) {
+        impl->setTempo(bpm);
+    }
+
+    void Vst3Plugin::setTransportState(bool playing) {
+        impl->setTransportState(playing);
+    }
+
+    void Vst3Plugin::resetTransportPosition() {
+        impl->resetTransportPosition();
     }
 
 } // namespace OwnVst3Host

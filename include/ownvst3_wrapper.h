@@ -107,6 +107,21 @@ OWN_VST3_WRAPPER_API bool VST3Plugin_IsEditorOpen(VST3PluginHandle handle);
 // Helper function to clear string cache
 OWN_VST3_WRAPPER_API void VST3Plugin_ClearStringCache();
 
+// Returns the actual input channel count accepted by the plugin (after setBusArrangement)
+OWN_VST3_WRAPPER_API int VST3Plugin_GetActualInputChannels(VST3PluginHandle handle);
+
+// Returns the actual output channel count accepted by the plugin (after setBusArrangement)
+OWN_VST3_WRAPPER_API int VST3Plugin_GetActualOutputChannels(VST3PluginHandle handle);
+
+// Sets the playback tempo (BPM) forwarded to the plugin via ProcessContext
+OWN_VST3_WRAPPER_API void VST3Plugin_SetTempo(VST3PluginHandle handle, double bpm);
+
+// Sets the transport playing state forwarded via ProcessContext
+OWN_VST3_WRAPPER_API void VST3Plugin_SetTransportState(VST3PluginHandle handle, bool isPlaying);
+
+// Resets the transport sample position counter (e.g. on Stop)
+OWN_VST3_WRAPPER_API void VST3Plugin_ResetTransportPosition(VST3PluginHandle handle);
+
 #ifdef __cplusplus
 }
 #endif

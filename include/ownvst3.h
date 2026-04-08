@@ -103,6 +103,21 @@ public:
     // Check if the editor window is currently open
     bool isEditorOpen();
 
+    // Returns the actual input channel count accepted by the plugin after setBusArrangement
+    int getActualInputChannels();
+
+    // Returns the actual output channel count accepted by the plugin after setBusArrangement
+    int getActualOutputChannels();
+
+    // Sets the playback tempo (BPM) forwarded to the plugin via ProcessContext
+    void setTempo(double bpm);
+
+    // Sets the transport playing state forwarded via ProcessContext
+    void setTransportState(bool playing);
+
+    // Resets the transport sample position counter (e.g. on Stop)
+    void resetTransportPosition();
+
 private:
     std::unique_ptr<Vst3PluginImpl> impl;  // Implementation object (PIMPL pattern)
 

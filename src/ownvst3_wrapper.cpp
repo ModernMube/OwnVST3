@@ -207,3 +207,28 @@ bool VST3Plugin_IsEditorOpen(VST3PluginHandle handle) {
 void VST3Plugin_ClearStringCache() {
     g_stringCache.clear();
 }
+
+int VST3Plugin_GetActualInputChannels(VST3PluginHandle handle) {
+    if (!handle) return 2;
+    return static_cast<Vst3Plugin*>(handle)->getActualInputChannels();
+}
+
+int VST3Plugin_GetActualOutputChannels(VST3PluginHandle handle) {
+    if (!handle) return 2;
+    return static_cast<Vst3Plugin*>(handle)->getActualOutputChannels();
+}
+
+void VST3Plugin_SetTempo(VST3PluginHandle handle, double bpm) {
+    if (handle)
+        static_cast<Vst3Plugin*>(handle)->setTempo(bpm);
+}
+
+void VST3Plugin_SetTransportState(VST3PluginHandle handle, bool isPlaying) {
+    if (handle)
+        static_cast<Vst3Plugin*>(handle)->setTransportState(isPlaying);
+}
+
+void VST3Plugin_ResetTransportPosition(VST3PluginHandle handle) {
+    if (handle)
+        static_cast<Vst3Plugin*>(handle)->resetTransportPosition();
+}
