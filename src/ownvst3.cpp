@@ -749,14 +749,14 @@ public:
             std::vector<SpeakerArrangement> inputArr(numInputBuses,  stereo);
             std::vector<SpeakerArrangement> outputArr(numOutputBuses, stereo);
 
-            tresult busResult = processor->setBusArrangement(
+            tresult busResult = processor->setBusArrangements(
                 inputArr.data(),  numInputBuses,
                 outputArr.data(), numOutputBuses);
 
             if (busResult != kResultOk) {
                 // Stereo failed – try mono inputs with stereo outputs
                 std::fill(inputArr.begin(), inputArr.end(), mono);
-                processor->setBusArrangement(
+                processor->setBusArrangements(
                     inputArr.data(),  numInputBuses,
                     outputArr.data(), numOutputBuses);
                 // Continue even if this also fails; use plugin default arrangement
