@@ -1013,21 +1013,31 @@ public:
     // Checks if the plugin is an instrument (accepts MIDI, produces audio)
     bool isInstrument() {
         if (!component) return false;
-        
+
         int numEventInputs = component->getBusCount(kEvent, kInput);
         int numAudioOutputs = component->getBusCount(kAudio, kOutput);
-        
+
         return (numEventInputs > 0 && numAudioOutputs > 0);
     }
-    
+
     // Checks if the plugin is an effect (processes audio)
     bool isEffect() {
         if (!component) return false;
-        
+
         int numAudioInputs = component->getBusCount(kAudio, kInput);
         int numAudioOutputs = component->getBusCount(kAudio, kOutput);
-        
+
         return (numAudioInputs > 0 && numAudioOutputs > 0);
+    }
+
+    // Checks if the plugin accepts MIDI events but has no audio output (e.g. MIDI effect, arpeggiator)
+    bool isMidiOnly() {
+        if (!component) return false;
+
+        int numEventInputs = component->getBusCount(kEvent, kInput);
+        int numAudioOutputs = component->getBusCount(kAudio, kOutput);
+
+        return (numEventInputs > 0 && numAudioOutputs == 0);
     }
     
     // Gets the plugin name
@@ -1391,6 +1401,10 @@ static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, D
 
     bool Vst3Plugin::isEffect() {
         return impl->isEffect();
+    }
+
+    bool Vst3Plugin::isMidiOnly() {
+        return impl->isMidiOnly();
     }
 
     std::string Vst3Plugin::getName() {

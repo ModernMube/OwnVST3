@@ -173,6 +173,11 @@ bool VST3Plugin_IsEffect(VST3PluginHandle handle) {
     return static_cast<Vst3Plugin*>(handle)->isEffect();
 }
 
+bool VST3Plugin_IsMidiOnly(VST3PluginHandle handle) {
+    if (!handle) return false;
+    return static_cast<Vst3Plugin*>(handle)->isMidiOnly();
+}
+
 const char* VST3Plugin_GetName(VST3PluginHandle handle) {
     if (!handle) return "";
     return g_stringCache.addString(static_cast<Vst3Plugin*>(handle)->getName());

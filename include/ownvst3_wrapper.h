@@ -86,11 +86,14 @@ OWN_VST3_WRAPPER_API bool VST3Plugin_ProcessAudio(VST3PluginHandle handle, Audio
 // Process MIDI events
 OWN_VST3_WRAPPER_API bool VST3Plugin_ProcessMidi(VST3PluginHandle handle, const MidiEventC* events, int eventCount);
 
-// Check if plugin is an instrument
+// Check if plugin is an instrument (MIDI input + audio output)
 OWN_VST3_WRAPPER_API bool VST3Plugin_IsInstrument(VST3PluginHandle handle);
 
-// Check if plugin is an effect
+// Check if plugin is an effect (audio input + audio output)
 OWN_VST3_WRAPPER_API bool VST3Plugin_IsEffect(VST3PluginHandle handle);
+
+// Check if plugin accepts MIDI but has no audio output (e.g. MIDI effect, arpeggiator)
+OWN_VST3_WRAPPER_API bool VST3Plugin_IsMidiOnly(VST3PluginHandle handle);
 
 // Plugin information
 OWN_VST3_WRAPPER_API const char* VST3Plugin_GetName(VST3PluginHandle handle);

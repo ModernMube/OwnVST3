@@ -87,8 +87,9 @@ public:
     bool processMidi(const std::vector<MidiEvent>& events);
     
     // Plugin type checking functions
-    bool isInstrument();  // Checks if plugin is an instrument
-    bool isEffect();      // Checks if plugin is an effect
+    bool isInstrument();  // Checks if plugin is an instrument (MIDI input + audio output)
+    bool isEffect();      // Checks if plugin is an effect (audio input + audio output)
+    bool isMidiOnly();    // Checks if plugin accepts MIDI but has no audio output
     
     // Plugin information functions
     std::string getName();       // Gets plugin name
