@@ -100,24 +100,24 @@ bool VST3Plugin_GetEditorSize(VST3PluginHandle handle, int* width, int* height) 
 
 int VST3Plugin_GetParameterCount(VST3PluginHandle handle) {
     if (!handle) return 0;
-    return static_cast<Vst3Plugin*>(handle)->getParameters().size();
+    return static_cast<Vst3Plugin*>(handle)->getParameterCount();
 }
 
 bool VST3Plugin_GetParameterAt(VST3PluginHandle handle, int index, VST3ParameterC* parameter) {
     if (!handle || !parameter) return false;
     
-    auto params = static_cast<Vst3Plugin*>(handle)->getParameters();
-    if (index < 0 || index >= params.size()) return false;
+    Vst3Parameter param;
+    if (static_cast<Vst3Plugin*>(handle)->getParameterInfo(index, param)) {
+        parameter->id = param.id;
+        parameter->name = g_stringCache.addString(param.name);
+        parameter->minValue = param.minValue;
+        parameter->maxValue = param.maxValue;
+        parameter->defaultValue = param.defaultValue;
+        parameter->currentValue = param.currentValue;
+        return true;
+    }
     
-    auto& param = params[index];
-    parameter->id = param.id;
-    parameter->name = g_stringCache.addString(param.name);
-    parameter->minValue = param.minValue;
-    parameter->maxValue = param.maxValue;
-    parameter->defaultValue = param.defaultValue;
-    parameter->currentValue = param.currentValue;
-    
-    return true;
+    return false;
 }
 
 bool VST3Plugin_SetParameter(VST3PluginHandle handle, int paramId, double value) {

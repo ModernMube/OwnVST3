@@ -857,6 +857,28 @@ public:
         }
     }
     
+    // Gets total parameter count in O(1)
+    int getParameterCount() const {
+        return controller ? controller->getParameterCount() : 0;
+    }
+    
+    // Gets a single parameter's detailed info without rebuilding the entire list
+    bool getParameterInfo(int index, Vst3Parameter& outParam) {
+        if (!controller) return false;
+        
+        ParameterInfo info;
+        if (controller->getParameterInfo(index, info) == kResultOk) {
+            outParam.id = info.id;
+            outParam.name = tchar_to_utf8(info.title);
+            outParam.minValue = 0.0;
+            outParam.maxValue = 1.0;
+            outParam.defaultValue = info.defaultNormalizedValue;
+            outParam.currentValue = controller->getParamNormalized(info.id);
+            return true;
+        }
+        return false;
+    }
+    
     // Sets a parameter value by ID
     // Thread-safe: writes to atomic cache for later processing by audio thread
     bool setParameter(int paramId, double value) {
@@ -1404,6 +1426,14 @@ static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, D
 
     std::vector<Vst3Parameter> Vst3Plugin::getParameters() {
         return impl->getParameters();
+    }
+
+    int Vst3Plugin::getParameterCount() {
+        return impl->getParameterCount();
+    }
+
+    bool Vst3Plugin::getParameterInfo(int index, Vst3Parameter& outParam) {
+        return impl->getParameterInfo(index, outParam);
     }
 
     bool Vst3Plugin::setParameter(int paramId, double value) {

@@ -74,6 +74,8 @@ public:
     
     // Parameter management functions
     std::vector<Vst3Parameter> getParameters(); // Gets all plugin parameters
+    int getParameterCount();                    // Gets total parameter count (O(1))
+    bool getParameterInfo(int index, Vst3Parameter& outParam); // Gets parameter by index (O(1))
     bool setParameter(int paramId, double value); // Sets parameter value
     double getParameter(int paramId);           // Gets parameter value
     
