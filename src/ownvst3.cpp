@@ -102,6 +102,31 @@ public:
         return false;
     }
 
+    // Lightweight struct to carry a single pending parameter change
+    // Used by the audio thread to avoid touching the parameters vector
+    struct PendingChange {
+        uint32_t id;
+        double value;
+    };
+
+    // Called from audio thread ONLY.
+    // Atomically drains all pending changes into the caller-supplied buffer.
+    // Returns the number of changes collected.
+    // Does NOT access the parameters vector – fully safe against concurrent
+    // updateParameters() / parameters.clear() calls on the UI thread.
+    size_t popAllChanges(PendingChange* outChanges, size_t maxChanges) {
+        size_t count = 0;
+        for (size_t i = 0; i < MAX_CACHED_PARAMETERS && count < maxChanges; ++i) {
+            if (cache[i].changed.load(std::memory_order_acquire)) {
+                outChanges[count].id    = cache[i].id.load(std::memory_order_relaxed);
+                outChanges[count].value = cache[i].value.load(std::memory_order_relaxed);
+                cache[i].changed.store(false, std::memory_order_release);
+                ++count;
+            }
+        }
+        return count;
+    }
+
 private:
     std::array<AtomicParameterValue, MAX_CACHED_PARAMETERS> cache;
 };
@@ -902,18 +927,24 @@ public:
         ctx.timeSigDenominator  = 4;
         data.processContext = &ctx;
 
-        // Process parameter changes from atomic cache (lock-free)
+        // Process parameter changes from atomic cache (lock-free).
+        // IMPORTANT: We intentionally do NOT iterate over the `parameters` vector here.
+        // The UI thread may call updateParameters() -> parameters.clear() at any time
+        // (e.g. triggered by a click/seek event on the C# side), which would cause a
+        // use-after-free / data-race crash if the audio thread read the vector concurrently.
+        // popAllChanges() operates exclusively on the atomic cache array and is fully
+        // safe to call from the audio thread without any mutex.
         ParameterChanges inputParamChanges;
         if (atomicParamCache.hasChanges()) {
-            for (const auto& param : parameters) {
-                double newValue;
-                if (atomicParamCache.getAndClearIfChanged(param.id, newValue)) {
-                    int32 index = 0;
-                    IParamValueQueue* queue = inputParamChanges.addParameterData(param.id, index);
-                    if (queue) {
-                        int32 pointIndex = 0;
-                        queue->addPoint(0, newValue, pointIndex);
-                    }
+            ThreadSafeParameterCache::PendingChange changes[MAX_CACHED_PARAMETERS];
+            size_t numChanges = atomicParamCache.popAllChanges(changes, MAX_CACHED_PARAMETERS);
+            for (size_t ci = 0; ci < numChanges; ++ci) {
+                int32 index = 0;
+                IParamValueQueue* queue = inputParamChanges.addParameterData(
+                    static_cast<ParamID>(changes[ci].id), index);
+                if (queue) {
+                    int32 pointIndex = 0;
+                    queue->addPoint(0, changes[ci].value, pointIndex);
                 }
             }
         }
