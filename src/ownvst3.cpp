@@ -879,16 +879,23 @@ public:
         return false;
     }
     
-    // Sets a parameter value by ID
-    // Thread-safe: writes to atomic cache for later processing by audio thread
+    // Sets a parameter value by ID.
+    // Thread-safe: only writes to the lock-free atomic cache.
+    //
+    // IMPORTANT: We intentionally do NOT call controller->setParamNormalized() here.
+    // That function acquires the VST plugin's internal mutex. If the audio thread
+    // is simultaneously inside processor->process() (which also holds the same
+    // internal mutex on many plugins), both threads block each other forever –
+    // a classic deadlock that manifests as a completely frozen UI.
+    //
+    // The audio thread picks up the cached value via popAllChanges() on the next
+    // processAudio() call, which is the correct VST3-spec way to deliver parameter
+    // changes: through the ProcessData::inputParameterChanges queue.
     bool setParameter(int paramId, double value) {
         if (!controller) return false;
 
-        // Write to atomic cache - this is lock-free and safe from any thread
+        // Write to atomic cache only – lock-free, safe from any thread.
         atomicParamCache.setParameter(static_cast<uint32_t>(paramId), value);
-
-        // Also update controller directly for immediate UI feedback
-        controller->setParamNormalized(paramId, value);
         return true;
     }
 
