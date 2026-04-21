@@ -53,25 +53,29 @@ extern "C" void OwnVst3_CloseChildWindows(void* nsViewHandle) {
 // ---------------------------------------------------------------------------
 // OwnVst3_ProcessIdleMacOS
 // Processes pending run loop events on the main thread.
-// Uses the CURRENT run loop mode so it works during modal tracking loops
-// (dropdown menus, popup menus, etc.).
-// Safe to call from any thread - silently returns if not on the main thread.
+//
+// IMPORTANT – DO NOT call CFRunLoopRunInMode() from here.
+//
+// This function is called from two contexts:
+//   1. From our CFRunLoopTimer callback – we are already INSIDE the run loop.
+//      Calling CFRunLoopRunInMode() would create a nested run loop, which
+//      causes CATransaction flush observers to fire inside JUCE's modal event
+//      loop. This corrupts CoreGraphics / AppKit internal pointer state and
+//      results in a PAC-authentication crash in CGGlyphBuilderLockBitmaps.
+//   2. From the C# "VST Editor Idle Thread" – that thread is NOT the main
+//      thread, so the isMainThread guard below exits immediately anyway.
+//
+// The Avalonia run loop on the main thread already pumps all events the
+// VST3 plugin needs. The CFRunLoopTimer firing IS the periodic idle tick;
+// re-entering the loop from within the callback is both unnecessary and
+// dangerous.
 // ---------------------------------------------------------------------------
 extern "C" void OwnVst3_ProcessIdleMacOS(void) {
-    // Only process events on the main thread.
-    // When called from a background thread (e.g., C# System.Threading.Timer),
-    // we must not try to pump the main run loop as this causes threading issues.
+    // Guard: only safe to touch AppKit/CoreFoundation objects on the main thread.
     if (![NSThread isMainThread]) return;
 
-    @autoreleasepool {
-        // Use the CURRENT run loop mode instead of kCFRunLoopDefaultMode.
-        // During modal tracking (dropdown menus), the mode is NSEventTrackingRunLoopMode.
-        // Using kCFRunLoopDefaultMode would miss events in the tracking mode.
-        CFRunLoopRef mainLoop = CFRunLoopGetMain();
-        CFStringRef currentMode = CFRunLoopCopyCurrentMode(mainLoop);
-        if (currentMode) {
-            CFRunLoopRunInMode(currentMode, 0, true);
-            CFRelease(currentMode);
-        }
-    }
+    // Intentionally empty on macOS:
+    // Avalonia's run loop is already running and will process all events.
+    // The timer callback that called us IS the idle tick. No nested loop needed.
 }
+

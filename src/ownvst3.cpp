@@ -657,7 +657,12 @@ public:
                 &context
             );
             if (idleTimer) {
-                CFRunLoopAddTimer(CFRunLoopGetMain(), idleTimer, kCFRunLoopCommonModes);
+                // Use kCFRunLoopDefaultMode (not kCFRunLoopCommonModes) so the timer
+                // does NOT fire during JUCE's modal event loops (preset popup menus, etc.).
+                // kCFRunLoopCommonModes includes NSEventTrackingRunLoopMode, which means
+                // the timer would fire inside JUCE's runModalLoop(), causing the timer
+                // callback to interfere with JUCE's own event dispatching.
+                CFRunLoopAddTimer(CFRunLoopGetMain(), idleTimer, kCFRunLoopDefaultMode);
             }
         }
 #endif
