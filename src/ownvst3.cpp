@@ -18,6 +18,7 @@
 #include <atomic>
 #include <array>
 #include <map>
+#include <functional>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -346,10 +347,18 @@ private:
 #endif
 };
 
-// IComponentHandler implementation – required by professional plugins (e.g. BiasFX2)
-// Without this, paramétermódosításkor null pointer dereference / freeze occurs.
-class OwnComponentHandler : public Steinberg::Vst::IComponentHandler {
+// IComponentHandler + IComponentHandler2 implementation.
+// IComponentHandler2 is required by JUCE-based hosts (T-Racks 6): they call
+// QueryInterface for it after initialization and dereference the result without
+// checking the return code – returning kNoInterface causes a null pointer crash.
+class OwnComponentHandler : public Steinberg::Vst::IComponentHandler,
+                            public Steinberg::Vst::IComponentHandler2 {
 public:
+    using RestartCallback = std::function<void(Steinberg::int32)>;
+
+    explicit OwnComponentHandler(RestartCallback cb = nullptr)
+        : restartCb(std::move(cb)), refCount(1) {}
+
     // IComponentHandler
     Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID /*id*/) override {
         return Steinberg::kResultOk;
@@ -366,15 +375,31 @@ public:
         return Steinberg::kResultOk;
     }
 
-    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 /*flags*/) override {
+    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 flags) override {
+        if (restartCb) restartCb(flags);
         return Steinberg::kResultOk;
     }
+
+    // IComponentHandler2
+    Steinberg::tresult PLUGIN_API setDirty(Steinberg::TBool /*state*/) override {
+        return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API requestOpenEditor(Steinberg::FIDString /*name*/) override {
+        return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API startGroupEdit() override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API finishGroupEdit() override { return Steinberg::kResultOk; }
 
     // FUnknown
     Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
         if (Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::Vst::IComponentHandler::iid) ||
             Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::FUnknown::iid)) {
-            *obj = this;
+            *obj = static_cast<Steinberg::Vst::IComponentHandler*>(this);
+            addRef();
+            return Steinberg::kResultOk;
+        }
+        if (Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::Vst::IComponentHandler2::iid)) {
+            *obj = static_cast<Steinberg::Vst::IComponentHandler2*>(this);
             addRef();
             return Steinberg::kResultOk;
         }
@@ -390,7 +415,8 @@ public:
     }
 
 private:
-    std::atomic<Steinberg::uint32> refCount{1};
+    RestartCallback restartCb;
+    std::atomic<Steinberg::uint32> refCount;
 };
 
 class Vst3PluginImpl : public FObject {
@@ -474,7 +500,16 @@ public:
 
                     // Register component handler – required by professional plugins (e.g. BiasFX2)
                     // Without this, null pointer dereference occurs during parameter changes
-                    componentHandler = new OwnComponentHandler();
+                    componentHandler = new OwnComponentHandler([this](Steinberg::int32 flags) {
+                        if (flags & 3) {   // kReloadComponent(1) | kIoChanged(2)
+                            component->setActive(false);
+                            setupProcessing();
+                            component->setActive(true);
+                        }
+                        if (flags & 20) {  // kParamValuesChanged(4) | kParamTitlesChanged(16)
+                            updateParameters();
+                        }
+                    });
                     componentHandler->addRef();
                     if (controller->setComponentHandler(componentHandler) != kResultOk) {
                         std::cerr << "setComponentHandler failed (non-fatal)" << std::endl;
@@ -769,8 +804,8 @@ public:
         // --- Bus arrangement negotiation (VST3 spec requirement) ---
         // Without this the plugin uses its own default channel count which may
         // differ from what the host sends, causing silence or incorrect processing.
-        int numInputBuses  = component->getBusCount(kAudio, kInput);
-        int numOutputBuses = component->getBusCount(kAudio, kOutput);
+        numInputBuses  = component->getBusCount(kAudio, kInput);
+        numOutputBuses = component->getBusCount(kAudio, kOutput);
 
         if (numInputBuses > 0 || numOutputBuses > 0) {
             SpeakerArrangement stereo = SpeakerArr::kStereo;
@@ -828,6 +863,16 @@ public:
 
         for (int i = 0; i < numOutputBuses; i++) {
             component->activateBus(kAudio, kOutput, i, true);
+        }
+
+        // Query which ProcessContext fields the plugin actually needs (VST3 3.7+).
+        // If the plugin doesn't implement this interface, fill all fields for
+        // backwards compatibility.
+        processContextRequirements = 0;
+        {
+            FUnknownPtr<IProcessContextRequirements> pcr(processor);
+            if (pcr)
+                processContextRequirements = pcr->getProcessContextRequirements();
         }
 
         return true;
@@ -926,39 +971,65 @@ public:
         Steinberg::Vst::ProcessData data;
         data.numSamples = buffer.numSamples;
 
-        // Setup audio data
-        Steinberg::Vst::AudioBusBuffers inputBuffers;
-        inputBuffers.numChannels = buffer.numChannels;
-        inputBuffers.channelBuffers32 = buffer.inputs;
-        inputBuffers.silenceFlags = 0;
+        // Build per-bus buffer arrays matching the count negotiated in setupProcessing().
+        // A hardcoded single-element array would cause a stack overread if the plugin
+        // (e.g. T-Racks 6 with sidechain) accesses data.inputs[1] or higher.
+        std::vector<Steinberg::Vst::AudioBusBuffers> inBusBuffers(numInputBuses);
+        std::vector<Steinberg::Vst::AudioBusBuffers> outBusBuffers(numOutputBuses);
 
-        Steinberg::Vst::AudioBusBuffers outputBuffers;
-        outputBuffers.numChannels = buffer.numChannels;
-        outputBuffers.channelBuffers32 = buffer.outputs;
-        outputBuffers.silenceFlags = 0;
+        if (numInputBuses > 0) {
+            inBusBuffers[0].numChannels      = std::min(buffer.numChannels, actualInputChannels);
+            inBusBuffers[0].channelBuffers32 = buffer.inputs;
+            inBusBuffers[0].silenceFlags     = 0;
+            for (int i = 1; i < numInputBuses; ++i)
+                inBusBuffers[i] = {};
+        }
+        if (numOutputBuses > 0) {
+            outBusBuffers[0].numChannels      = std::min(buffer.numChannels, actualOutputChannels);
+            outBusBuffers[0].channelBuffers32 = buffer.outputs;
+            outBusBuffers[0].silenceFlags     = 0;
+            for (int i = 1; i < numOutputBuses; ++i)
+                outBusBuffers[i] = {};
+        }
 
-        data.inputs = &inputBuffers;
-        data.outputs = &outputBuffers;
-        data.numInputs = 1;
-        data.numOutputs = 1;
+        data.inputs     = numInputBuses  > 0 ? inBusBuffers.data()  : nullptr;
+        data.outputs    = numOutputBuses > 0 ? outBusBuffers.data() : nullptr;
+        data.numInputs  = numInputBuses;
+        data.numOutputs = numOutputBuses;
 
         // Initialize missing fields
         data.processMode = Steinberg::Vst::ProcessModes::kRealtime;
         data.symbolicSampleSize = Steinberg::Vst::SymbolicSampleSizes::kSample32;
 
         // ProcessContext – required for tempo-synced effects (delay, tremolo, etc.)
-        // Without this some plugins crash or produce silence.
+        // Fill only the fields the plugin declared via IProcessContextRequirements.
+        // If the plugin didn't implement that interface (mask == 0), fill everything
+        // for backwards compatibility.
         ProcessContext ctx = {};
-        ctx.state = ProcessContext::kTempoValid
-                  | ProcessContext::kTimeSigValid
-                  | ProcessContext::kProjectTimeMusicValid;
-        if (isTransportPlaying)
-            ctx.state |= ProcessContext::kPlaying;
-        ctx.sampleRate          = sampleRate;
-        ctx.projectTimeSamples  = static_cast<int64>(currentSamplePos);
-        ctx.tempo               = currentBpm;
-        ctx.timeSigNumerator    = 4;
-        ctx.timeSigDenominator  = 4;
+        ctx.sampleRate         = sampleRate;
+        ctx.projectTimeSamples = static_cast<int64>(currentSamplePos);
+
+        const bool needAll = (processContextRequirements == 0);
+
+        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedTransportState)) {
+            if (isTransportPlaying) ctx.state |= ProcessContext::kPlaying;
+        }
+        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedTempo)) {
+            ctx.state |= ProcessContext::kTempoValid;
+            ctx.tempo = currentBpm;
+        }
+        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedTimeSignature)) {
+            ctx.state |= ProcessContext::kTimeSigValid;
+            ctx.timeSigNumerator   = 4;
+            ctx.timeSigDenominator = 4;
+        }
+        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedProjectTimeMusic)) {
+            ctx.state |= ProcessContext::kProjectTimeMusicValid;
+        }
+        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedBarPositionMusic)) {
+            ctx.state |= ProcessContext::kBarPositionValid;
+            ctx.barPositionMusic = 0.0;
+        }
         data.processContext = &ctx;
 
         // Process parameter changes from atomic cache (lock-free).
@@ -1311,9 +1382,15 @@ public:
     OwnComponentHandler* componentHandler = nullptr; // IComponentHandler for plugin callbacks
     bool isActive = false;                           // True after setActive(true) succeeds
 
-    // Bus channel counts negotiated by setBusArrangement
+    // Bus counts and channel counts – set by setupProcessing(), read by processAudio()
+    int numInputBuses        = 1;
+    int numOutputBuses       = 1;
     int actualInputChannels  = 2;
     int actualOutputChannels = 2;
+
+    // ProcessContext requirements mask from IProcessContextRequirements (VST3 3.7+).
+    // 0 means the plugin didn't implement the interface → fill all fields.
+    Steinberg::uint32 processContextRequirements = 0;
 
     // Transport / tempo state for ProcessContext
     double currentBpm         = 120.0;
