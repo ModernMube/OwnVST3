@@ -501,17 +501,14 @@ public:
 
                     // Register component handler – required by professional plugins (e.g. BiasFX2)
                     // Without this, null pointer dereference occurs during parameter changes
-                    componentHandler = new OwnComponentHandler([this](Steinberg::int32 flags) {
-                        // kReloadComponent(1) | kIoChanged(2): a full deactivate/reinit/reactivate
-                        // cycle here is unsafe – restartComponent may be called from within the
-                        // plugin's process() call or during audio streaming, and synchronously
-                        // calling setActive(false) would corrupt the DSP state (clear delay buffers,
-                        // filters, etc.) producing audible artefacts. The IComponentHandler2 fix
-                        // already resolved the original crash; these flags are intentionally ignored.
-                        if (flags & 20) {  // kParamValuesChanged(4) | kParamTitlesChanged(16)
-                            updateParameters();
-                        }
-                    });
+                    // IComponentHandler2 is implemented to satisfy JUCE-based hosts that call
+                    // QueryInterface for it (null-deref crash if it returns kNoInterface).
+                    // restartComponent is intentionally a no-op: calling any controller or
+                    // component method from this callback can be invoked on a non-main thread
+                    // by the plugin, which causes NSView/AppKit corruption on macOS (ObjC
+                    // bad_cache crash). The IComponentHandler2 presence alone resolves the
+                    // original crash; no reactive reinit is needed.
+                    componentHandler = new OwnComponentHandler();
                     componentHandler->addRef();
                     if (controller->setComponentHandler(componentHandler) != kResultOk) {
                         std::cerr << "setComponentHandler failed (non-fatal)" << std::endl;
@@ -1003,35 +1000,22 @@ public:
         data.processMode = Steinberg::Vst::ProcessModes::kRealtime;
         data.symbolicSampleSize = Steinberg::Vst::SymbolicSampleSizes::kSample32;
 
-        // ProcessContext – required for tempo-synced effects (delay, tremolo, etc.)
-        // Fill only the fields the plugin declared via IProcessContextRequirements.
-        // If the plugin didn't implement that interface (mask == 0), fill everything
-        // for backwards compatibility.
+        // ProcessContext – always fill all fields regardless of IProcessContextRequirements.
+        // Selective filling caused distortion with JUCE-based hosts (T-Racks 6): the plugin
+        // may read fields it did not explicitly declare (internal JUCE assumption), leading
+        // to undefined values and audible artefacts.
         ProcessContext ctx = {};
+        ctx.state = ProcessContext::kTempoValid
+                  | ProcessContext::kTimeSigValid
+                  | ProcessContext::kProjectTimeMusicValid
+                  | ProcessContext::kBarPositionValid;
+        if (isTransportPlaying) ctx.state |= ProcessContext::kPlaying;
         ctx.sampleRate         = sampleRate;
         ctx.projectTimeSamples = static_cast<int64>(currentSamplePos);
-
-        const bool needAll = (processContextRequirements == 0);
-
-        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedTransportState)) {
-            if (isTransportPlaying) ctx.state |= ProcessContext::kPlaying;
-        }
-        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedTempo)) {
-            ctx.state |= ProcessContext::kTempoValid;
-            ctx.tempo = currentBpm;
-        }
-        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedTimeSignature)) {
-            ctx.state |= ProcessContext::kTimeSigValid;
-            ctx.timeSigNumerator   = 4;
-            ctx.timeSigDenominator = 4;
-        }
-        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedProjectTimeMusic)) {
-            ctx.state |= ProcessContext::kProjectTimeMusicValid;
-        }
-        if (needAll || (processContextRequirements & IProcessContextRequirements::kNeedBarPositionMusic)) {
-            ctx.state |= ProcessContext::kBarPositionValid;
-            ctx.barPositionMusic = 0.0;
-        }
+        ctx.tempo              = currentBpm;
+        ctx.timeSigNumerator   = 4;
+        ctx.timeSigDenominator = 4;
+        ctx.barPositionMusic   = 0.0;
         data.processContext = &ctx;
 
         // Process parameter changes from atomic cache (lock-free).
