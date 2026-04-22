@@ -502,11 +502,12 @@ public:
                     // Register component handler – required by professional plugins (e.g. BiasFX2)
                     // Without this, null pointer dereference occurs during parameter changes
                     componentHandler = new OwnComponentHandler([this](Steinberg::int32 flags) {
-                        if (flags & 3) {   // kReloadComponent(1) | kIoChanged(2)
-                            component->setActive(false);
-                            setupProcessing();
-                            component->setActive(true);
-                        }
+                        // kReloadComponent(1) | kIoChanged(2): a full deactivate/reinit/reactivate
+                        // cycle here is unsafe – restartComponent may be called from within the
+                        // plugin's process() call or during audio streaming, and synchronously
+                        // calling setActive(false) would corrupt the DSP state (clear delay buffers,
+                        // filters, etc.) producing audible artefacts. The IComponentHandler2 fix
+                        // already resolved the original crash; these flags are intentionally ignored.
                         if (flags & 20) {  // kParamValuesChanged(4) | kParamTitlesChanged(16)
                             updateParameters();
                         }
@@ -979,14 +980,14 @@ public:
         std::vector<Steinberg::Vst::AudioBusBuffers> outBusBuffers(numOutputBuses);
 
         if (numInputBuses > 0) {
-            inBusBuffers[0].numChannels      = std::min(buffer.numChannels, actualInputChannels);
+            inBusBuffers[0].numChannels      = buffer.numChannels;
             inBusBuffers[0].channelBuffers32 = buffer.inputs;
             inBusBuffers[0].silenceFlags     = 0;
             for (int i = 1; i < numInputBuses; ++i)
                 inBusBuffers[i] = {};
         }
         if (numOutputBuses > 0) {
-            outBusBuffers[0].numChannels      = std::min(buffer.numChannels, actualOutputChannels);
+            outBusBuffers[0].numChannels      = buffer.numChannels;
             outBusBuffers[0].channelBuffers32 = buffer.outputs;
             outBusBuffers[0].silenceFlags     = 0;
             for (int i = 1; i < numOutputBuses; ++i)
