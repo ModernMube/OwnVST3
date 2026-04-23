@@ -552,16 +552,6 @@ public:
                 idleTimer = nullptr;
             }
 #endif
-#ifdef _WIN32
-            if (editorWindowHandle) {
-                KillTimer(editorWindowHandle, VST3_IDLE_TIMER_ID);
-                {
-                    std::lock_guard<std::mutex> lock(g_windowMapMutex);
-                    g_windowToPluginMap.erase(editorWindowHandle);
-                }
-                editorWindowHandle = nullptr;
-            }
-#endif
             // 1. Detach the editor view
             if (view) {
                 view->setFrame(nullptr);

@@ -32,7 +32,7 @@ elseif(UNIX AND NOT APPLE)
     add_definitions(-DRELEASE) 
 endif()
 
-add_definitions(-DVST3_WRAPPER_EXPORTS)
+add_definitions(-DOWN_VST3_WRAPPER_EXPORTS)
 add_definitions(-DOWN_VST3_HOST_EXPORTS)
 
 if(WIN32)
