@@ -749,11 +749,25 @@ public:
     // Initializes the plugin with specified sample rate and block size
     bool initialize(double newSampleRate, int newBlockSize) {
         if (!processor) return false;
-        
+
         sampleRate = newSampleRate;
         blockSize = newBlockSize;
-        
-        return setupProcessing();
+
+        // VST3 spec: setupProcessing() and activateBus() must only be called
+        // while the component is NOT active. loadPlugin() already called
+        // setActive(true), so we must deactivate first.
+        if (isActive && component) {
+            component->setActive(false);
+            isActive = false;
+        }
+
+        bool result = setupProcessing();
+
+        if (result && component && component->setActive(true) == kResultOk) {
+            isActive = true;
+        }
+
+        return result && isActive;
     }
     
     // Sets up audio processing with current settings
@@ -937,7 +951,7 @@ public:
         if (!processor) return false;
         if (!isActive) return false;
 
-        Steinberg::Vst::ProcessData data;
+        Steinberg::Vst::ProcessData data = {};
         data.numSamples = buffer.numSamples;
 
         // Update the pre-allocated bus buffer arrays (sized in setupProcessing).
