@@ -839,6 +839,11 @@ public:
         inBusBuffers.assign(numInputBuses,   Steinberg::Vst::AudioBusBuffers{});
         outBusBuffers.assign(numOutputBuses, Steinberg::Vst::AudioBusBuffers{});
 
+        // Pre-allocate parameter change queue slots so addParameterData() on the
+        // audio thread never triggers a heap allocation.
+        inputParamChanges.setMaxParameters(static_cast<int32>(MAX_CACHED_PARAMETERS));
+        outputParamChanges.setMaxParameters(static_cast<int32>(MAX_CACHED_PARAMETERS));
+
         return true;
     }
     
@@ -958,6 +963,13 @@ public:
         data.processMode = Steinberg::Vst::ProcessModes::kRealtime;
         data.symbolicSampleSize = Steinberg::Vst::SymbolicSampleSizes::kSample32;
 
+        // Snapshot transport state atomically once per block. All three variables are
+        // written by the host/UI thread; loading them into locals here avoids data races
+        // and ensures a consistent view throughout this entire audio callback.
+        double localSamplePos = currentSamplePos.load(std::memory_order_relaxed);
+        double localBpm       = currentBpm.load(std::memory_order_relaxed);
+        bool   localPlaying   = isTransportPlaying.load(std::memory_order_relaxed);
+
         // ProcessContext – always fill all fields regardless of IProcessContextRequirements.
         // Selective filling caused distortion with JUCE-based hosts (T-Racks 6): the plugin
         // may read fields it did not explicitly declare (internal JUCE assumption), leading
@@ -967,28 +979,21 @@ public:
                   | ProcessContext::kTimeSigValid
                   | ProcessContext::kProjectTimeMusicValid
                   | ProcessContext::kBarPositionValid;
-        if (isTransportPlaying) ctx.state |= ProcessContext::kPlaying;
+        if (localPlaying) ctx.state |= ProcessContext::kPlaying;
         ctx.sampleRate         = sampleRate;
-        ctx.projectTimeSamples = static_cast<int64>(currentSamplePos);
-        ctx.tempo              = currentBpm;
+        ctx.projectTimeSamples = static_cast<int64>(localSamplePos);
+        ctx.tempo              = localBpm;
         ctx.timeSigNumerator   = 4;
         ctx.timeSigDenominator = 4;
-        // FIX: Compute the actual musical time position (in quarter notes) from the
-        // number of samples played and the current tempo. Previously this was always 0.0,
-        // which caused tempo-synchronized effects (e.g. Chorus, Flanger) to have their
-        // LFO stuck at phase 0 – producing a static comb filter (robotic / metallic) sound.
-        ctx.projectTimeMusic   = (currentSamplePos / sampleRate) * (currentBpm / 60.0);
+        ctx.projectTimeMusic   = (localSamplePos / sampleRate) * (localBpm / 60.0);
         ctx.barPositionMusic   = 0.0;
         data.processContext = &ctx;
 
         // Process parameter changes from atomic cache (lock-free).
-        // IMPORTANT: We intentionally do NOT iterate over the `parameters` vector here.
-        // The UI thread may call updateParameters() -> parameters.clear() at any time
-        // (e.g. triggered by a click/seek event on the C# side), which would cause a
-        // use-after-free / data-race crash if the audio thread read the vector concurrently.
-        // popAllChanges() operates exclusively on the atomic cache array and is fully
-        // safe to call from the audio thread without any mutex.
-        ParameterChanges inputParamChanges;
+        // clearQueue() resets the used-count without freeing memory → no heap allocation.
+        // The pre-allocated slots (setMaxParameters in setupProcessing) guarantee that
+        // addParameterData() never needs to grow the internal vector on the audio thread.
+        inputParamChanges.clearQueue();
         if (atomicParamCache.hasChanges()) {
             ThreadSafeParameterCache::PendingChange changes[MAX_CACHED_PARAMETERS];
             size_t numChanges = atomicParamCache.popAllChanges(changes, MAX_CACHED_PARAMETERS);
@@ -1006,7 +1011,7 @@ public:
         data.inputParameterChanges = &inputParamChanges;
 
         // Capture output parameter changes (e.g. automation read-back from plugin)
-        ParameterChanges outputParamChanges;
+        outputParamChanges.clearQueue();
         data.outputParameterChanges = &outputParamChanges;
 
         // Process audio
@@ -1015,8 +1020,9 @@ public:
             return false;
         }
 
-        // Advance transport position
-        currentSamplePos += data.numSamples;
+        // Advance transport position using the local snapshot to avoid a
+        // read-modify-write race with resetTransportPosition() on the UI thread.
+        currentSamplePos.store(localSamplePos + data.numSamples, std::memory_order_relaxed);
 
         // FIX: Output parameter changes emitted by the plugin (e.g. potentiometers driven
         // by an internal LFO) must NOT be written back into the atomicParamCache.
@@ -1239,13 +1245,13 @@ public:
     int getActualOutputChannels() const { return actualOutputChannels; }
 
     // Sets the playback tempo (BPM) used in ProcessContext
-    void setTempo(double bpm) { currentBpm = bpm; }
+    void setTempo(double bpm) { currentBpm.store(bpm, std::memory_order_relaxed); }
 
     // Sets transport playing state used in ProcessContext
-    void setTransportState(bool playing) { isTransportPlaying = playing; }
+    void setTransportState(bool playing) { isTransportPlaying.store(playing, std::memory_order_relaxed); }
 
     // Resets the transport sample position counter to zero
-    void resetTransportPosition() { currentSamplePos = 0.0; }
+    void resetTransportPosition() { currentSamplePos.store(0.0, std::memory_order_relaxed); }
 
     private:
     // Finds component and controller IDs from the factory
@@ -1341,10 +1347,18 @@ public:
     std::vector<Steinberg::Vst::AudioBusBuffers> inBusBuffers;
     std::vector<Steinberg::Vst::AudioBusBuffers> outBusBuffers;
 
-    // Transport / tempo state for ProcessContext
-    double currentBpm         = 120.0;
-    double currentSamplePos   = 0.0;
-    bool   isTransportPlaying = false;
+    // Pre-allocated parameter change queues – kept as member variables so clearQueue()
+    // can reset them without freeing memory between audio callbacks.
+    // setMaxParameters() is called in setupProcessing() to pre-allocate all slots.
+    ParameterChanges inputParamChanges;
+    ParameterChanges outputParamChanges;
+
+    // Transport / tempo state for ProcessContext.
+    // Written by the host/UI thread, read by the audio thread → must be atomic
+    // to prevent data races that cause crackling and undefined behaviour.
+    std::atomic<double> currentBpm{120.0};
+    std::atomic<double> currentSamplePos{0.0};
+    std::atomic<bool>   isTransportPlaying{false};
 
         // FIX (Windows): editorWindowHandle member variable removed (timer no longer exists).
 
