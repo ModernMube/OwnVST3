@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
-#include <map>
 #include <functional>
 
 #ifdef _WIN32
@@ -252,19 +251,9 @@ private:
 };
 #endif
 
-#ifdef _WIN32
-// Windows timer constants for idle processing
-static constexpr UINT_PTR VST3_IDLE_TIMER_ID = 1001;
-static constexpr UINT VST3_IDLE_TIMER_INTERVAL_MS = 20; // ~50 Hz refresh rate
+// FIX (Windows): The VST3 idle timer (SetTimer/Vst3IdleTimerProc) has been fully removed.
+// See the comments in createEditor() and processIdle() for the rationale.
 
-// Forward declaration for timer callback
-class Vst3PluginImpl;
-static std::map<HWND, Vst3PluginImpl*> g_windowToPluginMap;
-static std::mutex g_windowMapMutex;
-
-// Timer callback function - processes idle events during modal loops (dropdown menus)
-static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
-#endif
 
 // IPlugFrame implementation for handling plugin editor window frame
 // Also implements IRunLoop on Linux for proper event handling
@@ -573,7 +562,7 @@ public:
                 editorWindowHandle = nullptr;
             }
 #endif
-            // 1. Távolítsuk el a nézetet
+            // 1. Detach the editor view
             if (view) {
                 view->setFrame(nullptr);
                 view->removed();
@@ -584,7 +573,7 @@ public:
                 plugFrame = nullptr;
             }
             
-            // 2. Deaktiválás, ha még aktív
+            // 2. Deactivate if still active
             if (component && isActive) {
                 try {
                     component->setActive(false);
@@ -592,26 +581,26 @@ public:
                 isActive = false;
             }
 
-            // 3. ComponentHandler felszabadítása
+            // 3. Release the component handler
             if (componentHandler) {
                 componentHandler->release();
                 componentHandler = nullptr;
             }
 
-            // 4. Minden referenciát null-ra állítunk, de nem hívunk terminate-et
+            // 4. Null out all references without calling terminate
             view = nullptr;
             processor = nullptr;
 
-            // Fontos: Elengedjük a referenciákat, de nem hívunk terminate-et
+            // Important: release references without calling terminate
             controller = nullptr;
             component = nullptr;
             factory = nullptr;
             
-            // 4. A module objektum felszabadításával a VST3 SDK kezeli a belső komponensek felszabadítását
+            // 5. Releasing the module lets the VST3 SDK clean up internal components
             module = nullptr;
         }
         catch (...) {
-            // Kivételek elnyomása
+            // Suppress exceptions
         }
     }
 
@@ -653,20 +642,11 @@ public:
             return false;
         }
 
-#ifdef _WIN32
-        // Start Windows timer for idle processing with callback
-        // This ensures processIdle is called even during modal dropdown menus
-        // The callback function (Vst3IdleTimerProc) is used instead of WM_TIMER messages
-        // because modal loops process timer callbacks but may not dispatch WM_TIMER to our window
-        editorWindowHandle = static_cast<HWND>(windowHandle);
-        if (editorWindowHandle) {
-            {
-                std::lock_guard<std::mutex> lock(g_windowMapMutex);
-                g_windowToPluginMap[editorWindowHandle] = this;
-            }
-            SetTimer(editorWindowHandle, VST3_IDLE_TIMER_ID, VST3_IDLE_TIMER_INTERVAL_MS, Vst3IdleTimerProc);
-        }
-#endif
+        // FIX (Windows): The SetTimer + Vst3IdleTimerProc approach has been removed.
+        // The host application's (Avalonia/WPF) main message loop already handles all Win32
+        // events. The PeekMessage loop in processIdle() called with a NULL parent window
+        // steals messages from the plugin's modal loop (e.g. preset dropdown menu),
+        // causing the menu to ignore mouse clicks and the UI to freeze.
 
 #ifdef __APPLE__
         // Store the NSView handle for child window cleanup on close
@@ -706,17 +686,7 @@ public:
     
     // Closes the plugin editor
     void closeEditor() {
-#ifdef _WIN32
-        // Stop Windows timer before closing editor
-        if (editorWindowHandle) {
-            KillTimer(editorWindowHandle, VST3_IDLE_TIMER_ID);
-            {
-                std::lock_guard<std::mutex> lock(g_windowMapMutex);
-                g_windowToPluginMap.erase(editorWindowHandle);
-            }
-            editorWindowHandle = nullptr;
-        }
-#endif
+        // FIX (Windows): KillTimer removed – the timer was never started.
 
 #ifdef __APPLE__
         // Stop macOS timer before closing editor
@@ -1013,6 +983,11 @@ public:
         ctx.tempo              = currentBpm;
         ctx.timeSigNumerator   = 4;
         ctx.timeSigDenominator = 4;
+        // FIX: Compute the actual musical time position (in quarter notes) from the
+        // number of samples played and the current tempo. Previously this was always 0.0,
+        // which caused tempo-synchronized effects (e.g. Chorus, Flanger) to have their
+        // LFO stuck at phase 0 – producing a static comb filter (robotic / metallic) sound.
+        ctx.projectTimeMusic   = (currentSamplePos / sampleRate) * (currentBpm / 60.0);
         ctx.barPositionMusic   = 0.0;
         data.processContext = &ctx;
 
@@ -1053,21 +1028,19 @@ public:
         // Advance transport position
         currentSamplePos += data.numSamples;
 
-        // Store output parameter changes into atomic cache so C# side can read them
-        int numQueues = outputParamChanges.getParameterCount();
-        for (int i = 0; i < numQueues; i++) {
-            IParamValueQueue* queue = outputParamChanges.getParameterData(i);
-            if (!queue) continue;
-            ParamID id = queue->getParameterId();
-            int numPoints = queue->getPointCount();
-            if (numPoints > 0) {
-                int32 pointOffset;
-                ParamValue value;
-                if (queue->getPoint(numPoints - 1, pointOffset, value) == kResultOk) {
-                    atomicParamCache.setParameter(id, value);
-                }
-            }
-        }
+        // FIX: Output parameter changes emitted by the plugin (e.g. potentiometers driven
+        // by an internal LFO) must NOT be written back into the atomicParamCache.
+        // The atomicParamCache is exclusively for INBOUND (host → plugin) changes.
+        // Writing them back created an infinite feedback loop:
+        //   1. Plugin emits an output parameter change.
+        //   2. Host stores it in the input cache.
+        //   3. On the next block, the host sends it back to the plugin as user input.
+        //   4. Plugin emits another change → GOTO 1.
+        // This generated thousands of events per second (event flooding), overloading
+        // the main thread on all platforms – particularly on macOS even without an open
+        // editor window – and causing a complete UI freeze.
+        // outputParamChanges is intentionally left unused here; per the VST3 spec,
+        // output parameter changes are intended for the audio engine only, not the host.
 
         return true;
     }
@@ -1257,14 +1230,11 @@ public:
         // - Properly handles NSEventTrackingRunLoopMode for popup menus
         OwnVst3_ProcessIdleMacOS();
 #endif
-#ifdef _WIN32
-        // Process any pending Windows messages
-        MSG msg;
-        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-#endif
+        // FIX (Windows): The PeekMessage(NULL) loop has been removed.
+        // That code removed messages from the entire thread's message queue (PM_REMOVE),
+        // including messages destined for the plugin's own modal menu loop. As a result,
+        // the plugin's modal loop never received mouse clicks and the UI froze.
+        // On Windows, the host application's (Avalonia) message loop is sufficient.
     }
 
     // Check if editor is currently open
@@ -1386,9 +1356,7 @@ public:
     double currentSamplePos   = 0.0;
     bool   isTransportPlaying = false;
 
-#ifdef _WIN32
-    HWND editorWindowHandle = nullptr;             // Windows editor window handle for timer
-#endif
+        // FIX (Windows): editorWindowHandle member variable removed (timer no longer exists).
 
 #ifdef __APPLE__
     CFRunLoopTimerRef idleTimer = nullptr;         // macOS idle timer for event processing
@@ -1454,28 +1422,6 @@ public:
     #endif
     };
 
-#ifdef _WIN32
-// Windows timer callback implementation
-// Called automatically during modal loops (dropdown menus) to keep UI responsive
-static void CALLBACK Vst3IdleTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
-    (void)uMsg;
-    (void)idEvent;
-    (void)dwTime;
-
-    Vst3PluginImpl* plugin = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_windowMapMutex);
-        auto it = g_windowToPluginMap.find(hwnd);
-        if (it != g_windowToPluginMap.end()) {
-            plugin = it->second;
-        }
-    }
-
-    if (plugin) {
-        plugin->processIdle();
-    }
-}
-#endif
 
     // Vst3Plugin implementation - Add OWN_VST3_HOST_API to fix the inconsistent dll linkage warning
     Vst3Plugin::Vst3Plugin() : impl(new Vst3PluginImpl()) {}

@@ -37,7 +37,7 @@ struct StringCache {
             char* dupStr = strdup(str.c_str());
         #endif
         
-        // Most tároljuk el a dupStr-t a cache-ben
+        // Store the duplicated string in the cache
         cache[index] = dupStr;
         
         // Save current position and increment index
