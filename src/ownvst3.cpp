@@ -874,6 +874,11 @@ public:
                 processContextRequirements = pcr->getProcessContextRequirements();
         }
 
+        // Pre-allocate bus buffer arrays here (UI thread) so processAudio() can reuse
+        // them without any heap allocation on the real-time audio thread.
+        inBusBuffers.assign(numInputBuses,   Steinberg::Vst::AudioBusBuffers{});
+        outBusBuffers.assign(numOutputBuses, Steinberg::Vst::AudioBusBuffers{});
+
         return true;
     }
     
@@ -970,25 +975,18 @@ public:
         Steinberg::Vst::ProcessData data;
         data.numSamples = buffer.numSamples;
 
-        // Build per-bus buffer arrays matching the count negotiated in setupProcessing().
-        // A hardcoded single-element array would cause a stack overread if the plugin
-        // (e.g. T-Racks 6 with sidechain) accesses data.inputs[1] or higher.
-        std::vector<Steinberg::Vst::AudioBusBuffers> inBusBuffers(numInputBuses);
-        std::vector<Steinberg::Vst::AudioBusBuffers> outBusBuffers(numOutputBuses);
-
+        // Update the pre-allocated bus buffer arrays (sized in setupProcessing).
+        // No heap allocation here – the audio thread must remain allocation-free to
+        // prevent malloc-mutex blocking, which causes crackling / buffer underruns.
         if (numInputBuses > 0) {
             inBusBuffers[0].numChannels      = buffer.numChannels;
             inBusBuffers[0].channelBuffers32 = buffer.inputs;
             inBusBuffers[0].silenceFlags     = 0;
-            for (int i = 1; i < numInputBuses; ++i)
-                inBusBuffers[i] = {};
         }
         if (numOutputBuses > 0) {
             outBusBuffers[0].numChannels      = buffer.numChannels;
             outBusBuffers[0].channelBuffers32 = buffer.outputs;
             outBusBuffers[0].silenceFlags     = 0;
-            for (int i = 1; i < numOutputBuses; ++i)
-                outBusBuffers[i] = {};
         }
 
         data.inputs     = numInputBuses  > 0 ? inBusBuffers.data()  : nullptr;
@@ -1377,6 +1375,11 @@ public:
     // ProcessContext requirements mask from IProcessContextRequirements (VST3 3.7+).
     // 0 means the plugin didn't implement the interface → fill all fields.
     Steinberg::uint32 processContextRequirements = 0;
+
+    // Pre-allocated bus buffer arrays – sized once in setupProcessing(), reused every
+    // processAudio() call to avoid heap allocation on the real-time audio thread.
+    std::vector<Steinberg::Vst::AudioBusBuffers> inBusBuffers;
+    std::vector<Steinberg::Vst::AudioBusBuffers> outBusBuffers;
 
     // Transport / tempo state for ProcessContext
     double currentBpm         = 120.0;
