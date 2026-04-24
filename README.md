@@ -27,7 +27,7 @@ OwnVst3Host is a C++ library that provides a simplified interface for hosting VS
 
 ## Requirements
 
-- C++14 or higher
+- C++17 or higher
 - VST3 SDK (Steinberg)
 - Windows, macOS, or Linux operating system
 
@@ -140,23 +140,36 @@ The main class for interacting with VST3 plugins.
 - `void closeEditor()` - Closes the plugin editor
 - `void resizeEditor(int width, int height)` - Resizes the plugin editor window
 - `bool getEditorSize(int& width, int& height)` - Gets the editor's preferred size
+- `void processIdle()` - Processes idle events (should be called periodically from UI thread)
+- `bool isEditorOpen()` - Checks if the editor window is currently open
 
 #### Parameter Management
 - `std::vector<Vst3Parameter> getParameters()` - Gets all available parameters
+- `int getParameterCount()` - Gets total parameter count
+- `bool getParameterInfo(int index, Vst3Parameter& outParam)` - Gets parameter by index
 - `bool setParameter(int paramId, double value)` - Sets a parameter value
 - `double getParameter(int paramId)` - Gets a parameter value
 
 #### Audio and MIDI Processing
 - `bool processAudio(AudioBuffer& buffer)` - Processes audio through the plugin
 - `bool processMidi(const std::vector<MidiEvent>& events)` - Sends MIDI events to the plugin
+- `int getActualInputChannels()` - Gets the actual input channel count accepted by the plugin
+- `int getActualOutputChannels()` - Gets the actual output channel count accepted by the plugin
+
+#### Transport State
+- `void setTempo(double bpm)` - Sets the playback tempo (BPM)
+- `void setTransportState(bool playing)` - Sets the transport playing state
+- `void resetTransportPosition()` - Resets the transport sample position counter
 
 #### Plugin Type
 - `bool isInstrument()` - Checks if the plugin is an instrument
 - `bool isEffect()` - Checks if the plugin is an effect
+- `bool isMidiOnly()` - Checks if the plugin accepts MIDI but has no audio output
 
 #### Plugin Information
 - `std::string getName()` - Gets the plugin name
 - `std::string getVendor()` - Gets the plugin vendor
+- `std::string getVersion()` - Gets the plugin version
 - `std::string getPluginInfo()` - Gets formatted plugin information
 
 ### C Wrapper API
@@ -172,16 +185,25 @@ A C-compatible wrapper is available for use with languages that can interface wi
 - `void VST3Plugin_CloseEditor(VST3PluginHandle handle)` - Closes editor
 - `void VST3Plugin_ResizeEditor(VST3PluginHandle handle, int width, int height)` - Resizes editor
 - `bool VST3Plugin_GetEditorSize(VST3PluginHandle handle, int* width, int* height)` - Gets editor size
+- `void VST3Plugin_ProcessIdle(VST3PluginHandle handle)` - Processes idle events
+- `bool VST3Plugin_IsEditorOpen(VST3PluginHandle handle)` - Checks if editor is currently open
 - `int VST3Plugin_GetParameterCount(VST3PluginHandle handle)` - Gets parameter count
 - `bool VST3Plugin_GetParameterAt(VST3PluginHandle handle, int index, VST3ParameterC* parameter)` - Gets parameter by index
 - `bool VST3Plugin_SetParameter(VST3PluginHandle handle, int paramId, double value)` - Sets parameter
 - `double VST3Plugin_GetParameter(VST3PluginHandle handle, int paramId)` - Gets parameter value
 - `bool VST3Plugin_ProcessAudio(VST3PluginHandle handle, AudioBufferC* buffer)` - Processes audio
 - `bool VST3Plugin_ProcessMidi(VST3PluginHandle handle, const MidiEventC* events, int eventCount)` - Processes MIDI
+- `int VST3Plugin_GetActualInputChannels(VST3PluginHandle handle)` - Gets actual input channels
+- `int VST3Plugin_GetActualOutputChannels(VST3PluginHandle handle)` - Gets actual output channels
+- `void VST3Plugin_SetTempo(VST3PluginHandle handle, double bpm)` - Sets playback tempo
+- `void VST3Plugin_SetTransportState(VST3PluginHandle handle, bool isPlaying)` - Sets transport state
+- `void VST3Plugin_ResetTransportPosition(VST3PluginHandle handle)` - Resets transport position
 - `bool VST3Plugin_IsInstrument(VST3PluginHandle handle)` - Checks if instrument
 - `bool VST3Plugin_IsEffect(VST3PluginHandle handle)` - Checks if effect
+- `bool VST3Plugin_IsMidiOnly(VST3PluginHandle handle)` - Checks if plugin is MIDI only
 - `const char* VST3Plugin_GetName(VST3PluginHandle handle)` - Gets plugin name
 - `const char* VST3Plugin_GetVendor(VST3PluginHandle handle)` - Gets plugin vendor
+- `const char* VST3Plugin_GetVersion(VST3PluginHandle handle)` - Gets plugin version
 - `const char* VST3Plugin_GetPluginInfo(VST3PluginHandle handle)` - Gets plugin info
 - `void VST3Plugin_ClearStringCache()` - Clears the internal string cache
 
