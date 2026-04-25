@@ -100,6 +100,56 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// MidiEventSPSC – lock-free Single-Producer / Single-Consumer ring buffer
+// for MIDI events.
+//
+// Producer: UI/MIDI thread (processMidi).
+// Consumer: audio thread (processAudio).
+//
+// Events are queued here and drained at the start of each audio block so that
+// MIDI and audio always reach the plugin in a single process() call (VST3 spec).
+// ---------------------------------------------------------------------------
+static constexpr size_t MIDI_QUEUE_CAPACITY = 256;
+
+struct QueuedMidiEvent {
+    int32_t noteId;      // Unique per-voice ID for NoteOn/NoteOff pairing; -1 for CC/other
+    uint8_t status;
+    uint8_t data1;
+    uint8_t data2;
+    int32_t sampleOffset;
+};
+
+class MidiEventSPSC {
+public:
+    bool push(const QueuedMidiEvent& ev) {
+        size_t t    = tail.load(std::memory_order_relaxed);
+        size_t next = (t + 1u) % MIDI_QUEUE_CAPACITY;
+        if (next == head.load(std::memory_order_acquire))
+            return false; // full
+        buf[t] = ev;
+        tail.store(next, std::memory_order_release);
+        return true;
+    }
+
+    size_t popAll(QueuedMidiEvent* out, size_t maxOut) {
+        size_t h     = head.load(std::memory_order_relaxed);
+        size_t t     = tail.load(std::memory_order_acquire);
+        size_t count = 0;
+        while (h != t && count < maxOut) {
+            out[count++] = buf[h];
+            h = (h + 1u) % MIDI_QUEUE_CAPACITY;
+        }
+        head.store(h, std::memory_order_release);
+        return count;
+    }
+
+private:
+    alignas(64) std::atomic<size_t> head{0};
+    alignas(64) std::atomic<size_t> tail{0};
+    alignas(64) QueuedMidiEvent buf[MIDI_QUEUE_CAPACITY];
+};
+
+// ---------------------------------------------------------------------------
 
 #ifdef __linux__
 class LinuxRunLoop : public Linux::IRunLoop {
@@ -322,7 +372,9 @@ private:
 
 class Vst3PluginImpl : public FObject {
 public:
-    Vst3PluginImpl() : sampleRate(44100.0), blockSize(512) {}
+    Vst3PluginImpl() : sampleRate(44100.0), blockSize(512) {
+        activeNoteIds.fill(-1);
+    }
     ~Vst3PluginImpl() { unloadPlugin(); }
 
     bool loadPlugin(const std::string& pluginPath) {
@@ -633,6 +685,15 @@ public:
         for (int i = 1; i < numOutputBuses; ++i)
             component->activateBus(kAudio, kOutput, i, false);
 
+        // Activate the primary Event (MIDI) input bus for instruments.
+        // Without this, VST instruments ignore all incoming MIDI events.
+        numEventInputBuses = component->getBusCount(kEvent, kInput);
+        if (numEventInputBuses > 0) {
+            component->activateBus(kEvent, kInput, 0, true);
+            for (int i = 1; i < numEventInputBuses; ++i)
+                component->activateBus(kEvent, kInput, i, false);
+        }
+
         ProcessSetup setup;
         setup.processMode        = kRealtime;
         setup.symbolicSampleSize = kSample32;
@@ -667,8 +728,16 @@ public:
         inputParamChanges.setMaxParameters(static_cast<int32>(PARAM_QUEUE_CAPACITY));
         outputParamChanges.setMaxParameters(static_cast<int32>(PARAM_QUEUE_CAPACITY));
 
+        // Pre-allocate the MIDI EventList so processAudio() can drain the SPSC
+        // queue without any heap allocation. clear() only resets fillCount = 0.
+        preAllocEventList.setMaxSize(static_cast<int32>(MIDI_QUEUE_CAPACITY));
+
+        // Reset per-pitch noteId tracking (UI thread only; no audio thread access).
+        activeNoteIds.fill(-1);
+
         return true;
     }
+
 
     std::vector<Vst3Parameter> getParameters() {
         updateParameters();
@@ -856,6 +925,50 @@ public:
         outputParamChanges.clearQueue();
         data.outputParameterChanges = &outputParamChanges;
 
+        // Drain MIDI events from the lock-free SPSC queue and build the EventList.
+        // preAllocEventList was pre-allocated in setupProcessing(); clear() only
+        // resets fillCount – no heap activity on the audio thread.
+        preAllocEventList.clear();
+        {
+            size_t numMidi = midiQueue.popAll(midiScratch, MIDI_QUEUE_CAPACITY);
+            for (size_t mi = 0; mi < numMidi; ++mi) {
+                const QueuedMidiEvent& qev = midiScratch[mi];
+                Event e = {};
+                e.busIndex     = 0;
+                e.sampleOffset = qev.sampleOffset;
+                e.ppqPosition  = 0.0;
+
+                uint8_t msgType = qev.status & 0xF0;
+                if (msgType == 0x90 && qev.data2 > 0) {
+                    e.type            = Event::kNoteOnEvent;
+                    e.noteOn.channel  = qev.status & 0x0F;
+                    e.noteOn.pitch    = qev.data1;
+                    e.noteOn.velocity = qev.data2 / 127.0f;
+                    e.noteOn.length   = 0;
+                    e.noteOn.tuning   = 0.0f;
+                    e.noteOn.noteId   = qev.noteId;
+                } else if (msgType == 0x80 || (msgType == 0x90 && qev.data2 == 0)) {
+                    e.type             = Event::kNoteOffEvent;
+                    e.noteOff.channel  = qev.status & 0x0F;
+                    e.noteOff.pitch    = qev.data1;
+                    e.noteOff.velocity = qev.data2 / 127.0f;
+                    e.noteOff.tuning   = 0.0f;
+                    e.noteOff.noteId   = qev.noteId;
+                } else if (msgType == 0xB0) {
+                    e.type                    = Event::kLegacyMIDICCOutEvent;
+                    e.midiCCOut.channel       = static_cast<Steinberg::int8>(qev.status & 0x0F);
+                    e.midiCCOut.controlNumber = static_cast<Steinberg::uint8>(qev.data1);
+                    // LegacyMIDICCOutEvent::value is int8 in [0, 127] – do NOT normalise.
+                    e.midiCCOut.value         = static_cast<Steinberg::int8>(qev.data2);
+                } else {
+                    continue; // skip unsupported message types
+                }
+                preAllocEventList.addEvent(e);
+            }
+        }
+        data.inputEvents = &preAllocEventList;
+
+
         if (processor->process(data) != kResultOk) {
             std::cerr << "Error during audio processing" << std::endl;
             return false;
@@ -870,64 +983,54 @@ public:
         return true;
     }
 
-    bool processMidi(const std::vector<MidiEvent>& events) {
-        if (!processor) return false;
+    // Queues MIDI events for delivery to the plugin during the next processAudio() call.
+    // Per the VST3 specification, audio buffers and events MUST be passed together in a
+    // single process() invocation; calling process() with numSamples==0 is non-compliant
+    // and silently ignored by many plugins (especially JUCE-based instruments).
+    //
+    // This method is called from the UI/MIDI thread and is allocation-free:
+    // events are written into the MidiEventSPSC ring buffer without any heap activity.
+    bool processMidi(const MidiEvent* events, int count) {
+        if (!processor || !events || count <= 0) return false;
 
-        EventList eventList;
+        bool anyDropped = false;
+        for (int i = 0; i < count; ++i) {
+            const MidiEvent& ev = events[i];
+            QueuedMidiEvent qev = {};
+            qev.status      = static_cast<uint8_t>(ev.status);
+            qev.data1       = static_cast<uint8_t>(ev.data1);
+            qev.data2       = static_cast<uint8_t>(ev.data2);
+            qev.sampleOffset = ev.sampleOffset;
 
-        for (const auto& event : events) {
-            Event e = {};
-            e.busIndex      = 0;
-            e.sampleOffset  = event.sampleOffset;
-            e.ppqPosition   = 0.0;
+            uint8_t msgType = qev.status & 0xF0;
+            uint8_t pitch   = qev.data1 & 0x7F;
 
-            if ((event.status & 0xF0) == 0x90) {
-                e.type                = Event::kNoteOnEvent;
-                e.noteOn.channel      = event.status & 0x0F;
-                e.noteOn.pitch        = event.data1;
-                e.noteOn.velocity     = event.data2 / 127.0f;
-                e.noteOn.length       = 0;
-                e.noteOn.tuning       = 0.0f;
-                e.noteOn.noteId       = -1;
+            if (msgType == 0x90 && qev.data2 > 0) {
+                // NoteOn: assign a new unique noteId and remember it per pitch
+                // so the matching NoteOff can reference the same voice.
+                int32_t id = nextNoteId.fetch_add(1, std::memory_order_relaxed) & 0x7FFFFFFF;
+                activeNoteIds[pitch] = id;
+                qev.noteId = id;
+            } else if (msgType == 0x80 || (msgType == 0x90 && qev.data2 == 0)) {
+                // NoteOff (or NoteOn velocity 0): pair with the stored noteId.
+                qev.noteId = activeNoteIds[pitch];
+                activeNoteIds[pitch] = -1;
+            } else {
+                qev.noteId = -1; // CC, pitch bend, etc.
             }
-            else if ((event.status & 0xF0) == 0x80) {
-                e.type                 = Event::kNoteOffEvent;
-                e.noteOff.channel      = event.status & 0x0F;
-                e.noteOff.pitch        = event.data1;
-                e.noteOff.velocity     = event.data2 / 127.0f;
-                e.noteOff.tuning       = 0.0f;
-                e.noteOff.noteId       = -1;
-            }
-            else if ((event.status & 0xF0) == 0xB0) {
-                e.type                       = Event::kLegacyMIDICCOutEvent;
-                e.midiCCOut.channel          = static_cast<Steinberg::int8>(event.status & 0x0F);
-                e.midiCCOut.controlNumber    = static_cast<Steinberg::uint8>(event.data1);
-                // LegacyMIDICCOutEvent::value is int8 in [0, 127] – do NOT normalise.
-                e.midiCCOut.value            = static_cast<Steinberg::int8>(event.data2);
-            }
 
-            eventList.addEvent(e);
+            if (!midiQueue.push(qev))
+                anyDropped = true;
         }
 
-        // Zero-initialise so processContext, inputParameterChanges and other pointer
-        // fields are null rather than garbage. A plugin that dereferences a null
-        // processContext during a MIDI-only call is violating the VST3 spec, but
-        // a plugin that dereferences an uninitialised pointer will crash hard.
-        ProcessData data = {};
-        data.processMode        = kRealtime;
-        data.symbolicSampleSize = kSample32;
-        data.numSamples         = 0;
-        data.numInputs          = 0;
-        data.numOutputs         = 0;
-        data.inputEvents        = &eventList;
+        if (anyDropped)
+            std::cerr << "MIDI queue full – some events dropped (audio thread backpressure)" << std::endl;
 
-        if (processor->process(data) != kResultOk) {
-            std::cerr << "Error during MIDI processing" << std::endl;
-            return false;
-        }
-
+        // Always return true: events are queued and will be delivered during
+        // the next processAudio() call, which is the correct VST3 behaviour.
         return true;
     }
+
 
     bool isInstrument() {
         if (!component) return false;
@@ -1091,6 +1194,7 @@ private:
 
     int numInputBuses        = 1;
     int numOutputBuses       = 1;
+    int numEventInputBuses   = 0;
     int actualInputChannels  = 2;
     int actualOutputChannels = 2;
 
@@ -1113,6 +1217,19 @@ private:
     // No hash collision possible (unlike the previous direct-mapped cache).
     ParamChangeSPSC paramQueue;
 
+    // Lock-free SPSC queue for MIDI events: UI/MIDI thread pushes, audio thread pops.
+    // Events are converted to VST3 Event structs and passed via data.inputEvents
+    // in processAudio(), ensuring a single process() call per block (VST3 spec).
+    MidiEventSPSC midiQueue;
+
+    // Scratch buffer for draining midiQueue on the audio thread – stack-sized,
+    // no heap allocation.
+    QueuedMidiEvent midiScratch[MIDI_QUEUE_CAPACITY];
+
+    // Pre-allocated EventList for passing MIDI events to the plugin.
+    // setMaxSize() is called in setupProcessing(); clear() only resets fillCount.
+    EventList preAllocEventList;
+
     // Mutex protecting lastSetValues – never held on the audio thread.
     std::mutex paramMutex;
 
@@ -1121,6 +1238,12 @@ private:
     // avoid acquiring the plugin's internal mutex from the UI thread while the
     // audio thread may be inside process() holding the same mutex.
     std::unordered_map<uint32_t, double> lastSetValues;
+
+    // Per-pitch noteId tracking (UI/MIDI thread only – never accessed from audio thread).
+    // Assigns a unique, monotonically increasing ID to each NoteOn so the matching
+    // NoteOff can reference the same voice. Prevents hanging notes in polyphonic synths.
+    std::atomic<int32_t> nextNoteId{0};
+    std::array<int32_t, 128> activeNoteIds; // index = MIDI pitch, value = noteId or -1
 
     // Transport state – written by UI thread, read by audio thread.
     std::atomic<double> currentBpm{120.0};
@@ -1177,7 +1300,7 @@ bool        Vst3Plugin::setParameter(int id, double v)           { return impl->
 double      Vst3Plugin::getParameter(int id)                     { return impl->getParameter(id); }
 bool        Vst3Plugin::initialize(double sr, int bs)            { return impl->initialize(sr, bs); }
 bool        Vst3Plugin::processAudio(AudioBuffer& b)             { return impl->processAudio(b); }
-bool        Vst3Plugin::processMidi(const std::vector<MidiEvent>& e) { return impl->processMidi(e); }
+bool        Vst3Plugin::processMidi(const MidiEvent* events, int count) { return impl->processMidi(events, count); }
 bool        Vst3Plugin::isInstrument()                           { return impl->isInstrument(); }
 bool        Vst3Plugin::isEffect()                               { return impl->isEffect(); }
 bool        Vst3Plugin::isMidiOnly()                             { return impl->isMidiOnly(); }

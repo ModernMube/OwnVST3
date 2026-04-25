@@ -85,8 +85,10 @@ public:
     // Process audio through the plugin
     bool processAudio(AudioBuffer& buffer);
     
-    // Process MIDI events
-    bool processMidi(const std::vector<MidiEvent>& events);
+    // Process MIDI events.
+    // Events are queued into a lock-free buffer and delivered to the plugin
+    // during the next processAudio() call (VST3 spec: single process() per block).
+    bool processMidi(const MidiEvent* events, int count);
     
     // Plugin type checking functions
     bool isInstrument();  // Checks if plugin is an instrument (MIDI input + audio output)

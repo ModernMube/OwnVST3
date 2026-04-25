@@ -1,8 +1,8 @@
 // ownvst3_wrapper.cpp
 #include "../include/ownvst3.h"
 #include "../include/ownvst3_wrapper.h"
-#include <vector>
 #include <cstring>
+
 
 using namespace OwnVst3Host;
 
@@ -149,19 +149,17 @@ bool VST3Plugin_ProcessAudio(VST3PluginHandle handle, AudioBufferC* buffer) {
 
 bool VST3Plugin_ProcessMidi(VST3PluginHandle handle, const MidiEventC* events, int eventCount) {
     if (!handle || !events || eventCount <= 0) return false;
-    
-    std::vector<MidiEvent> midiEvents;
-    for (int i = 0; i < eventCount; i++) {
-        MidiEvent event;
-        event.status = events[i].status;
-        event.data1 = events[i].data1;
-        event.data2 = events[i].data2;
-        event.sampleOffset = events[i].sampleOffset;
-        midiEvents.push_back(event);
-    }
-    
-    return static_cast<Vst3Plugin*>(handle)->processMidi(midiEvents);
+
+    // MidiEventC (C API) and OwnVst3Host::MidiEvent (C++ API) have identical
+    // memory layout (int status, int data1, int data2, int sampleOffset).
+    // The static_assert catches any future layout divergence at compile time.
+    static_assert(sizeof(MidiEventC) == sizeof(OwnVst3Host::MidiEvent),
+                  "MidiEventC / MidiEvent layout mismatch – update the cast");
+
+    return static_cast<Vst3Plugin*>(handle)->processMidi(
+        reinterpret_cast<const OwnVst3Host::MidiEvent*>(events), eventCount);
 }
+
 
 bool VST3Plugin_IsInstrument(VST3PluginHandle handle) {
     if (!handle) return false;
