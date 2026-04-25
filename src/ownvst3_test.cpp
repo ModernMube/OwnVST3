@@ -2,7 +2,6 @@
 #include "../include/ownvst3_wrapper.h"
 #include <iostream>
 #include <string>
-#include <vector>
 #include <cmath> 
 
 int main(int argc, char* argv[]) {
@@ -86,9 +85,9 @@ int main(int argc, char* argv[]) {
     noteOn.data2 = 100;    // Velocity
     noteOn.sampleOffset = 0;
     
-    std::vector<OwnVst3Host::MidiEvent> midiEvents = { noteOn };
-    
-    if (!plugin.processMidi(midiEvents)) {
+    OwnVst3Host::MidiEvent midiEvents[] = { noteOn };
+
+    if (!plugin.processMidi(midiEvents, 1)) {
         std::cerr << "Error: MIDI processing failed!" << std::endl;
     } else {
         std::cout << "MIDI processing successful!" << std::endl;
