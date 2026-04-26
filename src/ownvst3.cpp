@@ -658,17 +658,23 @@ public:
             }
         }
 
+        // Only count channels on the PRIMARY bus (index 0).
+        // Secondary buses (sidechain, aux) are deactivated – their channel
+        // count must NOT be summed here. Doing so produced e.g. 4 for a
+        // stereo-main + stereo-sidechain plugin, which caused the C# host's
+        // bypass guard (numChannels != actualIn) to fire on every call, making
+        // the plugin completely silent even though processing was set up correctly.
         actualInputChannels  = 0;
         actualOutputChannels = 0;
-        for (int i = 0; i < numInputBuses; i++) {
+        if (numInputBuses > 0) {
             BusInfo info = {};
-            if (component->getBusInfo(kAudio, kInput, i, info) == kResultOk)
-                actualInputChannels += info.channelCount;
+            if (component->getBusInfo(kAudio, kInput, 0, info) == kResultOk)
+                actualInputChannels = info.channelCount;
         }
-        for (int i = 0; i < numOutputBuses; i++) {
+        if (numOutputBuses > 0) {
             BusInfo info = {};
-            if (component->getBusInfo(kAudio, kOutput, i, info) == kResultOk)
-                actualOutputChannels += info.channelCount;
+            if (component->getBusInfo(kAudio, kOutput, 0, info) == kResultOk)
+                actualOutputChannels = info.channelCount;
         }
 
         // Activate only the primary bus (index 0).
