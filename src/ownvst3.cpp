@@ -551,7 +551,7 @@ public:
                 },
                 &context);
             if (idleTimer)
-                CFRunLoopAddTimer(CFRunLoopGetMain(), idleTimer, kCFRunLoopDefaultMode);
+                CFRunLoopAddTimer(CFRunLoopGetMain(), idleTimer, kCFRunLoopCommonModes);
         }
 #endif
         return true;
