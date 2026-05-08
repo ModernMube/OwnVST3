@@ -37,11 +37,13 @@
 
 #ifdef __APPLE__
     #include <CoreFoundation/CoreFoundation.h>
+    #include <pthread.h>
 
     static constexpr CFTimeInterval MACOS_IDLE_TIMER_INTERVAL = 0.02;
 
     extern "C" void OwnVst3_CloseChildWindows(void* nsViewHandle);
     extern "C" void OwnVst3_ProcessIdleMacOS(void);
+    extern "C" void OwnVst3_DispatchSyncMainThread(void (*func)(void*), void* ctx);
 #endif
 
 using namespace Steinberg;
@@ -378,6 +380,17 @@ public:
     ~Vst3PluginImpl() { unloadPlugin(); }
 
     bool loadPlugin(const std::string& pluginPath) {
+#ifdef __APPLE__
+        if (!pthread_main_np()) {
+            struct Ctx { Vst3PluginImpl* self; const std::string* path; bool result; };
+            Ctx ctx{this, &pluginPath, false};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->result = c->self->loadPlugin(*c->path);
+            }, &ctx);
+            return ctx.result;
+        }
+#endif
         try {
             std::string error;
             module = VST3::Hosting::Module::create(pluginPath, error);

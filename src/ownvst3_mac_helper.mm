@@ -79,3 +79,11 @@ extern "C" void OwnVst3_ProcessIdleMacOS(void) {
     // The timer callback that called us IS the idle tick. No nested loop needed.
 }
 
+extern "C" void OwnVst3_DispatchSyncMainThread(void (*func)(void*), void* ctx) {
+    if ([NSThread isMainThread]) {
+        func(ctx);
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{ func(ctx); });
+    }
+}
+
