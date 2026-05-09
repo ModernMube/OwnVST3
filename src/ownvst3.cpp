@@ -52,6 +52,62 @@ using namespace Steinberg::Vst;
 namespace OwnVst3Host {
 
 // ---------------------------------------------------------------------------
+// MemoryIBStreamImpl – minimal IBStream over a growable byte buffer.
+// Used to serialize/deserialize plugin state via component->getState / setState.
+// ---------------------------------------------------------------------------
+class MemoryIBStreamImpl final : public IBStream {
+public:
+    std::vector<uint8_t> data_;
+    int64_t pos_ = 0;
+
+    MemoryIBStreamImpl() = default;
+    MemoryIBStreamImpl(const uint8_t* src, int len) : data_(src, src + len) {}
+
+    tresult PLUGIN_API read(void* buf, int32 n, int32* r) override {
+        int64_t avail = (int64_t)data_.size() - pos_;
+        int32 rd = (int32)(avail > 0 ? std::min((int64_t)n, avail) : 0);
+        if (rd > 0) std::memcpy(buf, data_.data() + pos_, rd);
+        pos_ += rd;
+        if (r) *r = rd;
+        return kResultOk;
+    }
+    tresult PLUGIN_API write(void* buf, int32 n, int32* w) override {
+        if (pos_ + n > (int64_t)data_.size()) data_.resize(pos_ + n);
+        std::memcpy(data_.data() + pos_, buf, n);
+        pos_ += n;
+        if (w) *w = n;
+        return kResultOk;
+    }
+    tresult PLUGIN_API seek(int64 sp, int32 mode, int64* res) override {
+        int64_t np;
+        if (mode == kIBSeekSet)      np = sp;
+        else if (mode == kIBSeekCur) np = pos_ + sp;
+        else if (mode == kIBSeekEnd) np = (int64_t)data_.size() + sp;
+        else return kInvalidArgument;
+        if (np < 0) return kResultFalse;
+        pos_ = np;
+        if (pos_ > (int64_t)data_.size()) data_.resize((size_t)pos_);
+        if (res) *res = pos_;
+        return kResultOk;
+    }
+    tresult PLUGIN_API tell(int64* pos) override {
+        if (pos) *pos = pos_;
+        return kResultOk;
+    }
+    uint32 PLUGIN_API addRef()  override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (std::memcmp(iid, IBStream::iid,   sizeof(TUID)) == 0 ||
+            std::memcmp(iid, FUnknown::iid,   sizeof(TUID)) == 0) {
+            if (obj) *obj = this;
+            return kResultOk;
+        }
+        if (obj) *obj = nullptr;
+        return kNoInterface;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // ParamChangeSPSC – lock-free Single-Producer / Single-Consumer ring buffer
 //
 // Producer: UI/host thread (setParameter).
@@ -1053,6 +1109,35 @@ public:
     }
 
 
+    // Serializes the processor state into a heap-allocated byte buffer.
+    // The caller must free the buffer with freeStateData().
+    bool getState(uint8_t** outData, int* outLen) {
+        if (!component || !outData || !outLen) return false;
+        MemoryIBStreamImpl stream;
+        if (component->getState(&stream) != kResultOk || stream.data_.empty()) return false;
+        *outLen  = (int)stream.data_.size();
+        *outData = new uint8_t[*outLen];
+        std::memcpy(*outData, stream.data_.data(), *outLen);
+        return true;
+    }
+
+    // Restores the processor state and syncs the controller display.
+    bool setState(const uint8_t* data, int len) {
+        if (!component || !data || len <= 0) return false;
+        {
+            MemoryIBStreamImpl stream(data, len);
+            if (component->setState(&stream) != kResultOk) return false;
+        }
+        // Sync the editor controller to show the restored values.
+        if (controller) {
+            MemoryIBStreamImpl ctrlStream(data, len);
+            controller->setComponentState(&ctrlStream);
+        }
+        return true;
+    }
+
+    static void freeStateData(uint8_t* data) { delete[] data; }
+
     bool isInstrument() {
         if (!component) return false;
         return component->getBusCount(kEvent, kInput) > 0 &&
@@ -1336,5 +1421,8 @@ int         Vst3Plugin::getActualOutputChannels()                { return impl->
 void        Vst3Plugin::setTempo(double bpm)                     { impl->setTempo(bpm); }
 void        Vst3Plugin::setTransportState(bool p)                { impl->setTransportState(p); }
 void        Vst3Plugin::resetTransportPosition()                 { impl->resetTransportPosition(); }
+bool        Vst3Plugin::getState(uint8_t** d, int* l)            { return impl->getState(d, l); }
+bool        Vst3Plugin::setState(const uint8_t* d, int l)        { return impl->setState(d, l); }
+void        Vst3Plugin::freeStateData(uint8_t* d)                { Vst3PluginImpl::freeStateData(d); }
 
 } // namespace OwnVst3Host

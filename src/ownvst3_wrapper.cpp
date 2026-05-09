@@ -235,3 +235,17 @@ void VST3Plugin_ResetTransportPosition(VST3PluginHandle handle) {
     if (handle)
         static_cast<Vst3Plugin*>(handle)->resetTransportPosition();
 }
+
+bool VST3Plugin_GetState(VST3PluginHandle handle, uint8_t** outData, int* outLength) {
+    if (!handle) return false;
+    return static_cast<Vst3Plugin*>(handle)->getState(outData, outLength);
+}
+
+bool VST3Plugin_SetState(VST3PluginHandle handle, const uint8_t* data, int length) {
+    if (!handle) return false;
+    return static_cast<Vst3Plugin*>(handle)->setState(data, length);
+}
+
+void VST3Plugin_FreeStateData(uint8_t* data) {
+    Vst3Plugin::freeStateData(data);
+}

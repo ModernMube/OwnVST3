@@ -123,6 +123,16 @@ public:
     // Resets the transport sample position counter (e.g. on Stop)
     void resetTransportPosition();
 
+    // State serialization: saves the complete processor state into a heap buffer.
+    // Call freeStateData() on the returned pointer when done.
+    bool getState(uint8_t** outData, int* outLength);
+
+    // State deserialization: restores the processor state and syncs the controller.
+    bool setState(const uint8_t* data, int length);
+
+    // Frees a buffer previously returned by getState().
+    static void freeStateData(uint8_t* data);
+
 private:
     std::unique_ptr<Vst3PluginImpl> impl;  // Implementation object (PIMPL pattern)
 
