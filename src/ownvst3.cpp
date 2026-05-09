@@ -836,6 +836,8 @@ public:
             lastSetValues[uid] = value;
         }
 
+        controller->setParamNormalized(uid, value);
+
         // If the queue is full (extremely unlikely at 1024 entries), the value is
         // already in lastSetValues and will be sent on the next setParameter() call.
         if (!paramQueue.push(uid, value))
