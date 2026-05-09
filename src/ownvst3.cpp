@@ -1121,6 +1121,21 @@ public:
     // The caller must free the buffer with freeStateData().
     bool getState(uint8_t** outData, int* outLen) {
         if (!component || !outData || !outLen) return false;
+#ifdef __APPLE__
+        // Many macOS VST3 plugins touch AppKit during getState and require the
+        // main thread. The plugin thread (PostCommand) is a background thread,
+        // so we dispatch back to the main thread synchronously — mirroring the
+        // same pattern used in loadPlugin().
+        if (!pthread_main_np()) {
+            struct Ctx { Vst3PluginImpl* self; uint8_t** outData; int* outLen; bool result; };
+            Ctx ctx{this, outData, outLen, false};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->result = c->self->getState(c->outData, c->outLen);
+            }, &ctx);
+            return ctx.result;
+        }
+#endif
         MemoryIBStreamImpl stream;
         if (component->getState(&stream) != kResultOk || stream.data_.empty()) return false;
         *outLen  = (int)stream.data_.size();
@@ -1135,6 +1150,19 @@ public:
     // and project saves reflect the actual loaded values, not stale defaults.
     bool setState(const uint8_t* data, int len) {
         if (!component || !data || len <= 0) return false;
+#ifdef __APPLE__
+        // Same macOS main-thread requirement as getState: dispatch synchronously
+        // so plugins that touch AppKit during setState work correctly.
+        if (!pthread_main_np()) {
+            struct Ctx { Vst3PluginImpl* self; const uint8_t* data; int len; bool result; };
+            Ctx ctx{this, data, len, false};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->result = c->self->setState(c->data, c->len);
+            }, &ctx);
+            return ctx.result;
+        }
+#endif
         {
             MemoryIBStreamImpl stream(data, len);
             if (component->setState(&stream) != kResultOk) return false;
