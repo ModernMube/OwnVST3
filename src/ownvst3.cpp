@@ -381,19 +381,25 @@ private:
 #endif
 };
 
+// Forward declaration needed by OwnComponentHandler::performEdit.
+class Vst3PluginImpl;
+
 // IComponentHandler + IComponentHandler2.
 // IComponentHandler2 is required by JUCE-based hosts (T-Racks 6): they
 // dereference the QueryInterface result without checking the return code.
 // restartComponent is intentionally a no-op: calling component or controller
 // methods from this callback can arrive on a non-main thread (JUCE internal
 // thread), which causes NSView/AppKit corruption on macOS.
+// performEdit is fully implemented after Vst3PluginImpl to allow calling
+// back into setParameter() which updates both the controller state and the
+// lock-free SPSC queue consumed by the audio thread.
 class OwnComponentHandler : public Steinberg::Vst::IComponentHandler,
                             public Steinberg::Vst::IComponentHandler2 {
 public:
-    explicit OwnComponentHandler() : refCount(1) {}
+    explicit OwnComponentHandler(Vst3PluginImpl* plugin) : refCount(1), pluginImpl(plugin) {}
 
     Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
-    Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) override;
     Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
     Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32) override { return Steinberg::kResultOk; }
 
@@ -427,6 +433,7 @@ public:
 
 private:
     std::atomic<Steinberg::uint32> refCount;
+    Vst3PluginImpl* pluginImpl;
 };
 
 class Vst3PluginImpl : public FObject {
@@ -500,7 +507,7 @@ public:
                 if (controller) {
                     controller->initialize(&hostApp);
 
-                    componentHandler = new OwnComponentHandler();
+                    componentHandler = new OwnComponentHandler(this);
                     componentHandler->addRef();
                     if (controller->setComponentHandler(componentHandler) != kResultOk)
                         std::cerr << "setComponentHandler failed (non-fatal)" << std::endl;
@@ -1123,6 +1130,9 @@ public:
     }
 
     // Restores the processor state and syncs the controller display.
+    // After restoring, updateParameters() is called to refresh the host-side
+    // parameter cache (lastSetValues) so that subsequent getParameter() calls
+    // and project saves reflect the actual loaded values, not stale defaults.
     bool setState(const uint8_t* data, int len) {
         if (!component || !data || len <= 0) return false;
         {
@@ -1134,6 +1144,9 @@ public:
             MemoryIBStreamImpl ctrlStream(data, len);
             controller->setComponentState(&ctrlStream);
         }
+        // Refresh the host-side parameter cache so that getParameter() and
+        // project-save snapshots return the newly restored values.
+        updateParameters();
         return true;
     }
 
@@ -1394,6 +1407,21 @@ private:
 
 Vst3Plugin::Vst3Plugin() : impl(new Vst3PluginImpl()) {}
 Vst3Plugin::~Vst3Plugin() {}
+
+// OwnComponentHandler::performEdit – implemented here because it calls back
+// into Vst3PluginImpl::setParameter which is defined above this point.
+// This routes editor-driven parameter changes (knob/slider moves in the
+// plugin UI) through the same path as host-initiated parameter sets:
+//   1. Updates the lastSetValues cache (for correct getParameter reads).
+//   2. Calls controller->setParamNormalized (keeps UI in sync).
+//   3. Enqueues the change into the lock-free SPSC paramQueue so the
+//      audio thread picks it up before the next process() block.
+Steinberg::tresult PLUGIN_API OwnComponentHandler::performEdit(
+        Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) {
+    if (pluginImpl)
+        pluginImpl->setParameter(static_cast<int>(id), valueNormalized);
+    return Steinberg::kResultOk;
+}
 
 bool        Vst3Plugin::loadPlugin(const std::string& p)         { return impl->loadPlugin(p); }
 bool        Vst3Plugin::createEditor(void* h)                    { return impl->createEditor(h); }
