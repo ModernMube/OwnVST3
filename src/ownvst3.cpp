@@ -846,9 +846,7 @@ public:
                 param.currentValue = controller->getParamNormalized(info.id);
                 parameters.push_back(param);
 
-                // Seed the last-set cache so getParameter() returns the plugin's
-                // current value before any setParameter() call has been made.
-                lastSetValues.emplace(static_cast<uint32_t>(info.id), param.currentValue);
+                lastSetValues[static_cast<uint32_t>(info.id)] = param.currentValue;
             }
         }
     }
@@ -1136,6 +1134,7 @@ public:
             return ctx.result;
         }
 #endif
+        updateParameters();
         MemoryIBStreamImpl stream;
         if (component->getState(&stream) != kResultOk || stream.data_.empty()) return false;
         *outLen  = (int)stream.data_.size();
