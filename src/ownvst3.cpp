@@ -56,7 +56,7 @@ namespace OwnVst3Host {
 // MemoryIBStreamImpl – minimal IBStream over a growable byte buffer.
 // Used to serialize/deserialize plugin state via component->getState / setState.
 // ---------------------------------------------------------------------------
-class MemoryIBStreamImpl final : public IBStream {
+class MemoryIBStreamImpl final : public IBStream, public ISizeableStream {
 public:
     std::vector<uint8_t> data_;
     int64_t pos_ = 0;
@@ -95,12 +95,24 @@ public:
         if (pos) *pos = pos_;
         return kResultOk;
     }
+    tresult PLUGIN_API getStreamSize(int64& size) override {
+        size = (int64)data_.size();
+        return kResultOk;
+    }
+    tresult PLUGIN_API setStreamSize(int64 size) override {
+        data_.resize((size_t)size);
+        return kResultOk;
+    }
     uint32 PLUGIN_API addRef()  override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
-        if (std::memcmp(iid, IBStream::iid,   sizeof(TUID)) == 0 ||
-            std::memcmp(iid, FUnknown::iid,   sizeof(TUID)) == 0) {
-            if (obj) *obj = this;
+        if (std::memcmp(iid, IBStream::iid,        sizeof(TUID)) == 0 ||
+            std::memcmp(iid, FUnknown::iid,        sizeof(TUID)) == 0) {
+            if (obj) *obj = static_cast<IBStream*>(this);
+            return kResultOk;
+        }
+        if (std::memcmp(iid, ISizeableStream::iid, sizeof(TUID)) == 0) {
+            if (obj) *obj = static_cast<ISizeableStream*>(this);
             return kResultOk;
         }
         if (obj) *obj = nullptr;
