@@ -1567,16 +1567,13 @@ Steinberg::tresult PLUGIN_API OwnComponentHandler::performEdit(
     return Steinberg::kResultOk;
 }
 
-// OwnComponentHandler::restartComponent – implemented here (after Vst3PluginImpl)
-// because scheduleParameterRefresh() is defined on Vst3PluginImpl.
-// Only kParamValuesChanged requires action: it schedules a parameter cache
-// refresh that processIdle() will execute on the UI thread, keeping AppKit safe.
+// Only kParamValuesChanged requires action: it sets the pendingParamRefresh flag
+// so that processIdle() can refresh the parameter cache safely on the UI thread.
 // kReloadComponent and kIoChanged are logged but not acted on because they
 // require full plugin teardown/re-init, which is a host-level decision.
 Steinberg::tresult PLUGIN_API OwnComponentHandler::restartComponent(Steinberg::int32 flags) {
     if (flags & Steinberg::Vst::kParamValuesChanged) {
-        if (pluginImpl)
-            pluginImpl->scheduleParameterRefresh();
+        scheduleParameterRefresh();
     }
     if (flags & Steinberg::Vst::kIoChanged)
         std::cerr << "OwnComponentHandler: kIoChanged received (not handled)" << std::endl;
