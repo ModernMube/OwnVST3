@@ -968,6 +968,12 @@ public:
         if (!processor) return false;
         if (!isActive.load(std::memory_order_acquire)) return false;
 
+        // Try to acquire the process mutex. If getState() is currently flushing
+        // parameters via a zero-sample process() call, skip this block silently
+        // rather than running two process() calls concurrently (not thread-safe).
+        std::unique_lock<std::mutex> procLock(audioProcessMutex, std::try_to_lock);
+        if (!procLock.owns_lock()) return true;
+
         ProcessData data = {};
         data.numSamples = buffer.numSamples;
 
@@ -1175,6 +1181,46 @@ public:
         }
 #endif
         updateParameters();
+
+        // Flush all current parameter values to the processor using a zero-sample
+        // process() call before getState(). Plugins like Classic EQ v6 that never
+        // call performEdit() leave the processor's serializable state at its
+        // initialization values unless we deliver the parameters explicitly here.
+        // updateParameters() above has already refreshed lastSetValues from
+        // controller->getParamNormalized(), so we use those as the flush payload.
+        // The audioProcessMutex ensures this process() call does not race with
+        // the audio thread's processAudio(); the audio thread uses try_to_lock
+        // and skips one block silently if the mutex is held here.
+        if (processor && isActive.load(std::memory_order_acquire)) {
+            ParameterChanges flushChanges;
+            {
+                std::lock_guard<std::mutex> lock(paramMutex);
+                if (!lastSetValues.empty()) {
+                    flushChanges.setMaxParameters(static_cast<int32>(lastSetValues.size()));
+                    for (const auto& kv : lastSetValues) {
+                        int32 idx = 0;
+                        IParamValueQueue* q = flushChanges.addParameterData(
+                            static_cast<ParamID>(kv.first), idx);
+                        if (q) {
+                            int32 pt = 0;
+                            q->addPoint(0, kv.second, pt);
+                        }
+                    }
+                }
+            }
+            if (flushChanges.getParameterCount() > 0) {
+                ProcessData flushData = {};
+                flushData.numSamples            = 0;
+                flushData.processMode           = kRealtime;
+                flushData.symbolicSampleSize    = kSample32;
+                flushData.numInputs             = 0;
+                flushData.numOutputs            = 0;
+                flushData.inputParameterChanges = &flushChanges;
+                std::lock_guard<std::mutex> procLock(audioProcessMutex);
+                processor->process(flushData);
+            }
+        }
+
         MemoryIBStreamImpl stream;
         component->getState(&stream);
         if (stream.data_.empty()) return false;
@@ -1431,6 +1477,13 @@ private:
 
     // Mutex protecting lastSetValues – never held on the audio thread.
     std::mutex paramMutex;
+
+    // Mutex held by processAudio() for the duration of each process() call.
+    // getState() acquires it (blocking) before the parameter-flush process()
+    // call so the two process() invocations never execute concurrently.
+    // processAudio() uses try_to_lock so it never blocks the audio thread:
+    // if getState() holds the lock, processAudio() skips the block silently.
+    std::mutex audioProcessMutex;
 
     // Last value set by the host for each parameter ID.
     // getParameter() reads this instead of controller->getParamNormalized() to
