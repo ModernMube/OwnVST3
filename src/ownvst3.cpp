@@ -904,7 +904,20 @@ public:
             lastSetValues[uid] = value;
         }
 
+#ifdef __APPLE__
+        if (!pthread_main_np()) {
+            struct Ctx { IEditController* ctrl; uint32_t id; double val; };
+            Ctx ctx{controller, uid, value};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->ctrl->setParamNormalized(c->id, c->val);
+            }, &ctx);
+        } else {
+            controller->setParamNormalized(uid, value);
+        }
+#else
         controller->setParamNormalized(uid, value);
+#endif
 
         if (!paramQueue.push(uid, value))
             std::cerr << "Parameter queue full – change for id=" << uid << " dropped (audio thread backpressure)" << std::endl;
