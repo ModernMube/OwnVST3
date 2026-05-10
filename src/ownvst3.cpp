@@ -1176,7 +1176,8 @@ public:
 #endif
         updateParameters();
         MemoryIBStreamImpl stream;
-        if (component->getState(&stream) != kResultOk || stream.data_.empty()) return false;
+        component->getState(&stream);
+        if (stream.data_.empty()) return false;
         *outLen  = (int)stream.data_.size();
         *outData = new uint8_t[*outLen];
         std::memcpy(*outData, stream.data_.data(), *outLen);
