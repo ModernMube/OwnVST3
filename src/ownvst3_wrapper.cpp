@@ -2,52 +2,56 @@
 #include "../include/ownvst3.h"
 #include "../include/ownvst3_wrapper.h"
 #include <cstring>
+#include <mutex>
 
 
 using namespace OwnVst3Host;
 
-// Helper structure for string cache
+// Helper structure for string cache.
+// Thread-safe: GetName/GetVendor/GetPluginInfo etc. may be called from
+// multiple threads simultaneously (e.g., UI + background scanner).
+// addString() uses a rotating slot so that returned pointers remain valid
+// until the same slot is overwritten (after MAX_STRINGS more calls).
 struct StringCache {
     static const int MAX_STRINGS = 64;
     char* cache[MAX_STRINGS];
     int index;
-    
+    std::mutex mtx;
+
     StringCache() : index(0) {
         for (int i = 0; i < MAX_STRINGS; i++) {
             cache[i] = nullptr;
         }
     }
-    
+
     ~StringCache() {
         clear();
     }
-    
+
     const char* addString(const std::string& str) {
+        std::lock_guard<std::mutex> lock(mtx);
+
         // Free old string if exists
         if (cache[index]) {
             free(cache[index]);
             cache[index] = nullptr;
         }
-        
+
         // Duplicate new string
         #ifdef _WIN32
             char* dupStr = _strdup(str.c_str());
         #else
-            // UNIX, Linux, macOS system
             char* dupStr = strdup(str.c_str());
         #endif
-        
-        // Store the duplicated string in the cache
+
         cache[index] = dupStr;
-        
-        // Save current position and increment index
         const char* result = cache[index];
         index = (index + 1) % MAX_STRINGS;
-        
         return result;
     }
-    
+
     void clear() {
+        std::lock_guard<std::mutex> lock(mtx);
         for (int i = 0; i < MAX_STRINGS; i++) {
             if (cache[i]) {
                 free(cache[i]);
@@ -57,6 +61,7 @@ struct StringCache {
         index = 0;
     }
 };
+
 
 // Global string cache
 static StringCache g_stringCache;

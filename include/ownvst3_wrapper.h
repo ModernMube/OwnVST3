@@ -125,6 +125,18 @@ OWN_VST3_WRAPPER_API void VST3Plugin_SetTransportState(VST3PluginHandle handle, 
 // Resets the transport sample position counter (e.g. on Stop)
 OWN_VST3_WRAPPER_API void VST3Plugin_ResetTransportPosition(VST3PluginHandle handle);
 
+// State serialization: saves the complete processor state into a heap buffer.
+// On success, *outData points to a native-allocated buffer of *outLength bytes.
+// The caller MUST free the buffer by calling VST3Plugin_FreeStateData().
+OWN_VST3_WRAPPER_API bool VST3Plugin_GetState(VST3PluginHandle handle, uint8_t** outData, int* outLength);
+
+// State deserialization: restores the processor state and syncs the controller.
+// data must point to a buffer of length bytes previously obtained via VST3Plugin_GetState().
+OWN_VST3_WRAPPER_API bool VST3Plugin_SetState(VST3PluginHandle handle, const uint8_t* data, int length);
+
+// Frees a buffer previously returned by VST3Plugin_GetState().
+OWN_VST3_WRAPPER_API void VST3Plugin_FreeStateData(uint8_t* data);
+
 #ifdef __cplusplus
 }
 #endif

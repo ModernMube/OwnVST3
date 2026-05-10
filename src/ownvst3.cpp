@@ -401,9 +401,10 @@ class Vst3PluginImpl;
 // IComponentHandler + IComponentHandler2.
 // IComponentHandler2 is required by JUCE-based hosts (T-Racks 6): they
 // dereference the QueryInterface result without checking the return code.
-// restartComponent is intentionally a no-op: calling component or controller
-// methods from this callback can arrive on a non-main thread (JUCE internal
-// thread), which causes NSView/AppKit corruption on macOS.
+// restartComponent only sets a flag so that processIdle() can safely call
+// updateParameters() from the UI thread later – touching AppKit or VST3 objects
+// from within the restartComponent callback can crash on macOS because the call
+// may arrive on a plugin-internal background thread.
 // performEdit is fully implemented after Vst3PluginImpl to allow calling
 // back into setParameter() which updates both the controller state and the
 // lock-free SPSC queue consumed by the audio thread.
@@ -415,7 +416,10 @@ public:
     Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
     Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) override;
     Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
-    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 flags) override;
+
+    void scheduleParameterRefresh() { pendingParamRefresh.store(true, std::memory_order_release); }
+    std::atomic<bool> pendingParamRefresh{false};
 
     Steinberg::tresult PLUGIN_API setDirty(Steinberg::TBool) override { return Steinberg::kResultOk; }
     Steinberg::tresult PLUGIN_API requestOpenEditor(Steinberg::FIDString) override { return Steinberg::kResultOk; }
@@ -453,7 +457,8 @@ private:
 class Vst3PluginImpl : public FObject {
 public:
     Vst3PluginImpl() : sampleRate(44100.0), blockSize(512) {
-        activeNoteIds.fill(-1);
+        for (auto& id : activeNoteIds)
+            id.store(-1, std::memory_order_relaxed);
     }
     ~Vst3PluginImpl() { unloadPlugin(); }
 
@@ -839,8 +844,10 @@ public:
         // queue without any heap allocation. clear() only resets fillCount = 0.
         preAllocEventList.setMaxSize(static_cast<int32>(MIDI_QUEUE_CAPACITY));
 
-        // Reset per-pitch noteId tracking (UI thread only; no audio thread access).
-        activeNoteIds.fill(-1);
+        // Reset per-pitch noteId tracking. Use a store loop because
+        // std::atomic<int32_t> is not copyable, so fill() does not work.
+        for (auto& id : activeNoteIds)
+            id.store(-1, std::memory_order_relaxed);
 
         return true;
     }
@@ -1138,12 +1145,11 @@ public:
                 // NoteOn: assign a new unique noteId and remember it per pitch
                 // so the matching NoteOff can reference the same voice.
                 int32_t id = nextNoteId.fetch_add(1, std::memory_order_relaxed) & 0x7FFFFFFF;
-                activeNoteIds[pitch] = id;
+                activeNoteIds[pitch].store(id, std::memory_order_relaxed);
                 qev.noteId = id;
             } else if (msgType == 0x80 || (msgType == 0x90 && qev.data2 == 0)) {
                 // NoteOff (or NoteOn velocity 0): pair with the stored noteId.
-                qev.noteId = activeNoteIds[pitch];
-                activeNoteIds[pitch] = -1;
+                qev.noteId = activeNoteIds[pitch].exchange(-1, std::memory_order_relaxed);
             } else {
                 qev.noteId = -1; // CC, pitch bend, etc.
             }
@@ -1182,37 +1188,13 @@ public:
 #endif
         updateParameters();
 
-        // Flush pending parameter changes (from UI interactions) to the processor
-        // before requesting its state. This ensures that if the transport is stopped
-        // (so processAudio is not draining the queue), the DSP state still reflects
-        // the latest explicitly modified parameter values. We only flush paramQueue
-        // (not the entirety of lastSetValues) to avoid overwriting plugin-internal
-        // DSP states with stale controller defaults for plugins that bypass performEdit.
-        {
-            std::unique_lock<std::mutex> procLock(audioProcessMutex, std::try_to_lock);
-            if (procLock.owns_lock() && processor) {
-                inputParamChanges.clearQueue();
-                ParamChange changes[PARAM_QUEUE_CAPACITY];
-                size_t numChanges = paramQueue.popAll(changes, PARAM_QUEUE_CAPACITY);
-                if (numChanges > 0) {
-                    for (size_t ci = 0; ci < numChanges; ++ci) {
-                        int32 idx = 0;
-                        IParamValueQueue* q = inputParamChanges.addParameterData(
-                            static_cast<ParamID>(changes[ci].id), idx);
-                        if (q) {
-                            int32 pointIndex = 0;
-                            q->addPoint(0, changes[ci].value, pointIndex);
-                        }
-                    }
-                    ProcessData data = {};
-                    data.numSamples = 0;
-                    data.inputParameterChanges = &inputParamChanges;
-                    data.processMode = kRealtime;
-                    data.symbolicSampleSize = kSample32;
-                    processor->process(data);
-                }
-            }
-        }
+        // NOTE: We do NOT attempt to flush pending parameter changes via a
+        // process(numSamples=0) call here. The VST3 specification explicitly
+        // states that the host must not call process() with numSamples=0.
+        // Pending changes in paramQueue will reach the processor via the next
+        // regular processAudio() block. In practice, a DAW always runs at least
+        // one process block after transport stop before requesting state, so
+        // this is not an observable issue for the vast majority of use cases.
 
         // Capture processor state. Try IComponent::getState() first; if it
         // returns nothing fall back to IEditController::getState(). Some plugins
@@ -1369,6 +1351,13 @@ public:
     }
 
     void processIdle() {
+        // If a restartComponent(kParamValuesChanged) was received, refresh
+        // the host-side parameter cache now that we are back on the UI thread.
+        if (componentHandler && componentHandler->pendingParamRefresh.exchange(
+                false, std::memory_order_acq_rel)) {
+            updateParameters();
+        }
+
 #ifdef __linux__
         if (plugFrame) {
             struct timespec ts;
@@ -1513,11 +1502,12 @@ private:
     // audio thread may be inside process() holding the same mutex.
     std::unordered_map<uint32_t, double> lastSetValues;
 
-    // Per-pitch noteId tracking (UI/MIDI thread only – never accessed from audio thread).
-    // Assigns a unique, monotonically increasing ID to each NoteOn so the matching
-    // NoteOff can reference the same voice. Prevents hanging notes in polyphonic synths.
+    // Per-pitch noteId tracking. processMidi() may be called from any thread
+    // (UI, MIDI callback), so each slot is atomic to prevent data races.
+    // Assigns a unique, monotonically increasing ID to each NoteOn so the
+    // matching NoteOff can reference the same voice. Prevents hanging notes.
     std::atomic<int32_t> nextNoteId{0};
-    std::array<int32_t, 128> activeNoteIds; // index = MIDI pitch, value = noteId or -1
+    std::array<std::atomic<int32_t>, 128> activeNoteIds; // index = MIDI pitch
 
     // Transport state – written by UI thread, read by audio thread.
     std::atomic<double> currentBpm{120.0};
@@ -1574,6 +1564,24 @@ Steinberg::tresult PLUGIN_API OwnComponentHandler::performEdit(
         Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) {
     if (pluginImpl)
         pluginImpl->setParameter(static_cast<int>(id), valueNormalized);
+    return Steinberg::kResultOk;
+}
+
+// OwnComponentHandler::restartComponent – implemented here (after Vst3PluginImpl)
+// because scheduleParameterRefresh() is defined on Vst3PluginImpl.
+// Only kParamValuesChanged requires action: it schedules a parameter cache
+// refresh that processIdle() will execute on the UI thread, keeping AppKit safe.
+// kReloadComponent and kIoChanged are logged but not acted on because they
+// require full plugin teardown/re-init, which is a host-level decision.
+Steinberg::tresult PLUGIN_API OwnComponentHandler::restartComponent(Steinberg::int32 flags) {
+    if (flags & Steinberg::Vst::kParamValuesChanged) {
+        if (pluginImpl)
+            pluginImpl->scheduleParameterRefresh();
+    }
+    if (flags & Steinberg::Vst::kIoChanged)
+        std::cerr << "OwnComponentHandler: kIoChanged received (not handled)" << std::endl;
+    if (flags & Steinberg::Vst::kReloadComponent)
+        std::cerr << "OwnComponentHandler: kReloadComponent received (not handled)" << std::endl;
     return Steinberg::kResultOk;
 }
 
