@@ -1182,6 +1182,38 @@ public:
 #endif
         updateParameters();
 
+        // Flush pending parameter changes (from UI interactions) to the processor
+        // before requesting its state. This ensures that if the transport is stopped
+        // (so processAudio is not draining the queue), the DSP state still reflects
+        // the latest explicitly modified parameter values. We only flush paramQueue
+        // (not the entirety of lastSetValues) to avoid overwriting plugin-internal
+        // DSP states with stale controller defaults for plugins that bypass performEdit.
+        {
+            std::unique_lock<std::mutex> procLock(audioProcessMutex, std::try_to_lock);
+            if (procLock.owns_lock() && processor) {
+                inputParamChanges.clearQueue();
+                ParamChange changes[PARAM_QUEUE_CAPACITY];
+                size_t numChanges = paramQueue.popAll(changes, PARAM_QUEUE_CAPACITY);
+                if (numChanges > 0) {
+                    for (size_t ci = 0; ci < numChanges; ++ci) {
+                        int32 idx = 0;
+                        IParamValueQueue* q = inputParamChanges.addParameterData(
+                            static_cast<ParamID>(changes[ci].id), idx);
+                        if (q) {
+                            int32 pointIndex = 0;
+                            q->addPoint(0, changes[ci].value, pointIndex);
+                        }
+                    }
+                    ProcessData data = {};
+                    data.numSamples = 0;
+                    data.inputParameterChanges = &inputParamChanges;
+                    data.processMode = kRealtime;
+                    data.symbolicSampleSize = kSample32;
+                    processor->process(data);
+                }
+            }
+        }
+
         // Capture processor state. Try IComponent::getState() first; if it
         // returns nothing fall back to IEditController::getState(). Some plugins
         // (e.g. Voxengo) store their serialisable state in the controller rather
