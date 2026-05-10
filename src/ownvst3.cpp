@@ -627,6 +627,16 @@ public:
             return false;
         }
 
+        // Re-sync controller parameters after editor attach. Some plugins reset
+        // their UI to the processor's current state during createView/attached,
+        // overwriting any prior setParamNormalized calls. Re-applying lastSetValues
+        // ensures the editor displays the host-authoritative parameter state.
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            for (auto& [id, val] : lastSetValues)
+                controller->setParamNormalized(id, val);
+        }
+
 #ifdef __APPLE__
         editorNSViewHandle = windowHandle;
 
