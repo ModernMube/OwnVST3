@@ -1182,47 +1182,25 @@ public:
 #endif
         updateParameters();
 
-        // Flush all current parameter values to the processor using a zero-sample
-        // process() call before getState(). Plugins like Classic EQ v6 that never
-        // call performEdit() leave the processor's serializable state at its
-        // initialization values unless we deliver the parameters explicitly here.
-        // updateParameters() above has already refreshed lastSetValues from
-        // controller->getParamNormalized(), so we use those as the flush payload.
-        // The audioProcessMutex ensures this process() call does not race with
-        // the audio thread's processAudio(); the audio thread uses try_to_lock
-        // and skips one block silently if the mutex is held here.
-        if (processor && isActive.load(std::memory_order_acquire)) {
-            ParameterChanges flushChanges;
-            {
-                std::lock_guard<std::mutex> lock(paramMutex);
-                if (!lastSetValues.empty()) {
-                    flushChanges.setMaxParameters(static_cast<int32>(lastSetValues.size()));
-                    for (const auto& kv : lastSetValues) {
-                        int32 idx = 0;
-                        IParamValueQueue* q = flushChanges.addParameterData(
-                            static_cast<ParamID>(kv.first), idx);
-                        if (q) {
-                            int32 pt = 0;
-                            q->addPoint(0, kv.second, pt);
-                        }
-                    }
-                }
-            }
-            if (flushChanges.getParameterCount() > 0) {
-                ProcessData flushData = {};
-                flushData.numSamples            = 0;
-                flushData.processMode           = kRealtime;
-                flushData.symbolicSampleSize    = kSample32;
-                flushData.numInputs             = 0;
-                flushData.numOutputs            = 0;
-                flushData.inputParameterChanges = &flushChanges;
-                std::lock_guard<std::mutex> procLock(audioProcessMutex);
-                processor->process(flushData);
-            }
-        }
-
+        // Capture processor state. Try IComponent::getState() first; if it
+        // returns nothing fall back to IEditController::getState(). Some plugins
+        // (e.g. Voxengo) store their serialisable state in the controller rather
+        // than the component, so the controller blob is the authoritative source.
+        //
+        // NOTE: We intentionally do NOT flush lastSetValues to the processor via
+        // process(numSamples=0) here. lastSetValues is populated from
+        // controller->getParamNormalized() which may return stale default values
+        // for plugins that update their DSP directly from the editor without calling
+        // performEdit(). Flushing stale defaults would overwrite the plugin's own
+        // correctly-set DSP state, causing getState() to serialise those defaults.
         MemoryIBStreamImpl stream;
         component->getState(&stream);
+
+        if (stream.data_.empty() && controller) {
+            // Component returned nothing – try the controller's own persistent state.
+            controller->getState(&stream);
+        }
+
         if (stream.data_.empty()) return false;
         *outLen  = (int)stream.data_.size();
         *outData = new uint8_t[*outLen];
@@ -1258,13 +1236,25 @@ public:
             return ctx.result;
         }
 #endif
+        // Apply blob to the component. Some plugins (e.g. Voxengo) store their
+        // state in the controller (via IEditController::getState) rather than in
+        // the component, so component->setState() may return kResultFalse for a
+        // controller-origin blob. We continue regardless and let the controller
+        // path below handle it.
         {
             MemoryIBStreamImpl stream(data, len);
-            if (component->setState(&stream) != kResultOk) return false;
+            component->setState(&stream);
         }
         if (controller) {
+            // Standard sync: push component state to controller UI.
             MemoryIBStreamImpl ctrlStream(data, len);
             controller->setComponentState(&ctrlStream);
+
+            // Also restore the controller's own persistent state with the same
+            // blob. For plugins that saved via IEditController::getState() this
+            // is the authoritative restore path; for others it is a no-op.
+            MemoryIBStreamImpl ctrlOwnStream(data, len);
+            controller->setState(&ctrlOwnStream);
         }
         updateParameters();
         {
