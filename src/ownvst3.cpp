@@ -120,8 +120,10 @@ public:
 //   - If the queue is full, push() returns false; the latest value is still
 //     stored in lastSetValues so a subsequent setParameter() retries delivery.
 //   - head and tail are on separate cache lines to avoid false sharing.
+//   - Capacity is sized to accommodate full state restores on plugins with
+//     thousands of parameters (e.g. complex synthesizers) without overflow.
 // ---------------------------------------------------------------------------
-static constexpr size_t PARAM_QUEUE_CAPACITY = 1024;
+static constexpr size_t PARAM_QUEUE_CAPACITY = 8192;
 
 struct ParamChange {
     uint32_t id;
@@ -855,6 +857,10 @@ public:
         return controller ? controller->getParameterCount() : 0;
     }
 
+    /// Reads a single parameter by index and fills outParam.
+    /// Current value is read from the host-side lastSetValues cache to avoid
+    /// calling controller->getParamNormalized(), which can deadlock with the audio
+    /// thread on plugins that share an internal mutex between controller and processor.
     bool getParameterInfo(int index, Vst3Parameter& outParam) {
         if (!controller) return false;
 
@@ -868,8 +874,6 @@ public:
         outParam.maxValue     = 1.0;
         outParam.defaultValue = info.defaultNormalizedValue;
 
-        // Read current value from our cache to avoid calling into the controller
-        // (which holds an internal mutex shared with the audio thread on some plugins).
         bool hasCached = false;
         double cached  = 0.0;
         {
@@ -884,10 +888,12 @@ public:
         return true;
     }
 
-    // Delivers a parameter change to the audio thread via the lock-free SPSC queue.
-    // Also caches the value so getParameter() returns the correct value immediately,
-    // without querying the controller (which can deadlock with the audio thread on
-    // plugins that share an internal mutex between controller and processor).
+    /// Delivers a parameter change to the audio thread via the lock-free SPSC queue.
+    /// Also caches the value in lastSetValues so getParameter() returns the correct
+    /// value immediately without querying the controller, which can deadlock with the
+    /// audio thread on plugins that share an internal mutex between controller and processor.
+    /// If the queue is full, the value is already in lastSetValues and will be retried
+    /// on the next setParameter() call.
     bool setParameter(int paramId, double value) {
         if (!controller) return false;
 
@@ -900,17 +906,17 @@ public:
 
         controller->setParamNormalized(uid, value);
 
-        // If the queue is full (extremely unlikely at 1024 entries), the value is
-        // already in lastSetValues and will be sent on the next setParameter() call.
         if (!paramQueue.push(uid, value))
             std::cerr << "Parameter queue full – change for id=" << uid << " dropped (audio thread backpressure)" << std::endl;
 
         return true;
     }
 
-    // Returns the most recently set value for the given parameter.
-    // Reads from the host-side cache to avoid calling controller->getParamNormalized(),
-    // which acquires the plugin's internal mutex and can deadlock with the audio thread.
+    /// Returns the most recently set value for the given parameter ID.
+    /// Reads from the host-side lastSetValues cache to avoid calling
+    /// controller->getParamNormalized(), which acquires the plugin's internal mutex
+    /// and can deadlock with the audio thread. Falls back to the controller for
+    /// parameters not yet explicitly set by the host.
     double getParameter(int paramId) {
         uint32_t uid = static_cast<uint32_t>(paramId);
         {
@@ -919,7 +925,6 @@ public:
             if (it != lastSetValues.end())
                 return it->second;
         }
-        // Fall back to controller for parameters not yet explicitly set by the host.
         if (controller) return controller->getParamNormalized(paramId);
         return 0.0;
     }
@@ -1143,15 +1148,24 @@ public:
         return true;
     }
 
-    // Restores the processor state and syncs the controller display.
-    // After restoring, updateParameters() is called to refresh the host-side
-    // parameter cache (lastSetValues) so that subsequent getParameter() calls
-    // and project saves reflect the actual loaded values, not stale defaults.
+    /// Restores the processor state from a binary blob and synchronises all
+    /// dependent subsystems:
+    ///   1. Applies the blob to the IComponent via setState.
+    ///   2. Forwards the blob to the IEditController via setComponentState so
+    ///      the editor UI reflects the restored values.
+    ///   3. Calls updateParameters() to refresh the host-side lastSetValues cache
+    ///      so that subsequent getParameter() and project-save snapshots return
+    ///      the loaded values rather than stale defaults.
+    ///   4. Pushes every entry in lastSetValues into the lock-free SPSC paramQueue
+    ///      so the audio thread receives the restored values before the next
+    ///      processAudio() block – without this step, JUCE-based plugins that read
+    ///      parameters during process() would revert to defaults because the queue
+    ///      was empty and the controller-side update alone does not reach the processor.
+    /// On macOS, the call is dispatched synchronously to the main thread because
+    /// many plugins touch AppKit during setState.
     bool setState(const uint8_t* data, int len) {
         if (!component || !data || len <= 0) return false;
 #ifdef __APPLE__
-        // Same macOS main-thread requirement as getState: dispatch synchronously
-        // so plugins that touch AppKit during setState work correctly.
         if (!pthread_main_np()) {
             struct Ctx { Vst3PluginImpl* self; const uint8_t* data; int len; bool result; };
             Ctx ctx{this, data, len, false};
@@ -1166,14 +1180,16 @@ public:
             MemoryIBStreamImpl stream(data, len);
             if (component->setState(&stream) != kResultOk) return false;
         }
-        // Sync the editor controller to show the restored values.
         if (controller) {
             MemoryIBStreamImpl ctrlStream(data, len);
             controller->setComponentState(&ctrlStream);
         }
-        // Refresh the host-side parameter cache so that getParameter() and
-        // project-save snapshots return the newly restored values.
         updateParameters();
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            for (const auto& kv : lastSetValues)
+                paramQueue.push(kv.first, kv.second);
+        }
         return true;
     }
 
