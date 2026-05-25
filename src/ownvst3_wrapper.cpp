@@ -3,6 +3,9 @@
 #include "../include/ownvst3_wrapper.h"
 #include <cstring>
 #include <mutex>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 
 using namespace OwnVst3Host;
