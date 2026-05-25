@@ -5,6 +5,7 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/hosting/plugprovider.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -617,6 +618,31 @@ public:
         view->setFrame(plugFrame);
 
 #ifdef _WIN32
+        // Steinberg spec: setContentScaleFactor must be called BEFORE attached()
+        // so that HiDPI-aware plugins (IPlugViewContentScaleSupport, e.g. TDR Nova)
+        // can initialise their renderer at the correct DPI scale.
+        // Without this call, those plugins show only a white window on Windows.
+        // Guarded by #ifdef _WIN32 — macOS and Linux are unaffected.
+        {
+            FUnknownPtr<IPlugViewContentScaleSupport> scaleSupport(view);
+            if (scaleSupport) {
+                float scaleFactor = 1.0f;
+                // GetDpiForWindow is available since Windows 10 1607.
+                // Dynamic lookup so we fall back gracefully on older Windows.
+                HMODULE user32 = GetModuleHandleA("user32.dll");
+                if (user32) {
+                    typedef UINT (WINAPI* GetDpiForWindowFn)(HWND);
+                    auto fn = reinterpret_cast<GetDpiForWindowFn>(
+                        GetProcAddress(user32, "GetDpiForWindow"));
+                    if (fn) {
+                        UINT dpi = fn(reinterpret_cast<HWND>(windowHandle));
+                        if (dpi > 0)
+                            scaleFactor = static_cast<float>(dpi) / 96.0f;
+                    }
+                }
+                scaleSupport->setContentScaleFactor(scaleFactor);
+            }
+        }
         const auto platformType = kPlatformTypeHWND;
 #elif defined(__APPLE__)
         const auto platformType = kPlatformTypeNSView;
