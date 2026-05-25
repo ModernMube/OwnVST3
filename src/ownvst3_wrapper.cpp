@@ -254,3 +254,33 @@ bool VST3Plugin_SetState(VST3PluginHandle handle, const uint8_t* data, int lengt
 void VST3Plugin_FreeStateData(uint8_t* data) {
     Vst3Plugin::freeStateData(data);
 }
+
+#ifdef _WIN32
+// Windows-only SEH-safe DispatchMessage wrapper.
+// C# P/Invoke cannot catch corrupted-state exceptions (0xC0000005 / AccessViolation)
+// that originate inside native WndProcs called by DispatchMessage.  The .NET runtime
+// terminates the process instead of throwing a manageable exception.
+// By delegating the DispatchMessage call to this C++ function we can wrap it in an
+// SEH __try/__except block, which DOES catch the exception, log it, and return
+// gracefully – keeping the host alive even when a plugin's WndProc crashes.
+void VST3Plugin_SafeDispatchMessage(void* msg) {
+    __try {
+        DispatchMessage(static_cast<MSG*>(msg));
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH) {
+        MSG* m = static_cast<MSG*>(msg);
+        fprintf(stderr,
+            "[VST3Host] Caught SEH exception 0x%08lX in DispatchMessage "
+            "(hwnd=%p msg=0x%04X wParam=0x%IX lParam=0x%IX) – "
+            "plugin WndProc crash suppressed to keep host alive.\n",
+            static_cast<unsigned long>(GetExceptionCode()),
+            static_cast<void*>(m->hwnd),
+            static_cast<unsigned>(m->message),
+            static_cast<size_t>(m->wParam),
+            static_cast<size_t>(m->lParam));
+        fflush(stderr);
+    }
+}
+#endif
