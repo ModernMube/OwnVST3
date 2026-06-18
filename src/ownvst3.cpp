@@ -1,0 +1,1659 @@
+// ownvst3.cpp
+#include "../include/ownvst3.h"
+#include "pluginterfaces/base/ibstream.h"
+#include "pluginterfaces/vst/ivstaudioprocessor.h"
+#include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
+#include "public.sdk/source/vst/hosting/module.h"
+#include "public.sdk/source/vst/hosting/plugprovider.h"
+#include "public.sdk/source/vst/hosting/hostclasses.h"
+#include "public.sdk/source/vst/hosting/eventlist.h"
+#include "public.sdk/source/vst/hosting/parameterchanges.h"
+#include "base/source/fobject.h"
+
+#include <iostream>
+#include <mutex>
+#include <vector>
+#include <algorithm>
+#include <atomic>
+#include <array>
+#include <functional>
+#include <unordered_map>
+
+#ifdef _WIN32
+    #define NOMINMAX
+    #include <windows.h>
+#else
+    #include <locale>
+    #include <codecvt>
+#endif
+
+#ifdef __linux__
+    #include <sys/select.h>
+    #include <poll.h>
+    #include <unistd.h>
+    #include <time.h>
+#endif
+
+#ifdef __APPLE__
+    #include <CoreFoundation/CoreFoundation.h>
+    #include <pthread.h>
+
+    static constexpr CFTimeInterval MACOS_IDLE_TIMER_INTERVAL = 0.02;
+
+    extern "C" void OwnVst3_CloseChildWindows(void* nsViewHandle);
+    extern "C" void OwnVst3_ProcessIdleMacOS(void);
+    extern "C" void OwnVst3_DispatchSyncMainThread(void (*func)(void*), void* ctx);
+#endif
+
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+namespace OwnVst3Host {
+
+// ---------------------------------------------------------------------------
+// MemoryIBStreamImpl – minimal IBStream over a growable byte buffer.
+// Used to serialize/deserialize plugin state via component->getState / setState.
+// ---------------------------------------------------------------------------
+class MemoryIBStreamImpl final : public IBStream, public ISizeableStream {
+public:
+    std::vector<uint8_t> data_;
+    int64_t pos_ = 0;
+
+    MemoryIBStreamImpl() = default;
+    MemoryIBStreamImpl(const uint8_t* src, int len) : data_(src, src + len) {}
+
+    tresult PLUGIN_API read(void* buf, int32 n, int32* r) override {
+        int64_t avail = (int64_t)data_.size() - pos_;
+        int32 rd = (int32)(avail > 0 ? std::min((int64_t)n, avail) : 0);
+        if (rd > 0) std::memcpy(buf, data_.data() + pos_, rd);
+        pos_ += rd;
+        if (r) *r = rd;
+        return kResultOk;
+    }
+    tresult PLUGIN_API write(void* buf, int32 n, int32* w) override {
+        if (pos_ + n > (int64_t)data_.size()) data_.resize(pos_ + n);
+        std::memcpy(data_.data() + pos_, buf, n);
+        pos_ += n;
+        if (w) *w = n;
+        return kResultOk;
+    }
+    tresult PLUGIN_API seek(int64 sp, int32 mode, int64* res) override {
+        int64_t np;
+        if (mode == kIBSeekSet)      np = sp;
+        else if (mode == kIBSeekCur) np = pos_ + sp;
+        else if (mode == kIBSeekEnd) np = (int64_t)data_.size() + sp;
+        else return kInvalidArgument;
+        if (np < 0) return kResultFalse;
+        pos_ = np;
+        if (pos_ > (int64_t)data_.size()) data_.resize((size_t)pos_);
+        if (res) *res = pos_;
+        return kResultOk;
+    }
+    tresult PLUGIN_API tell(int64* pos) override {
+        if (pos) *pos = pos_;
+        return kResultOk;
+    }
+    tresult PLUGIN_API getStreamSize(int64& size) override {
+        size = (int64)data_.size();
+        return kResultOk;
+    }
+    tresult PLUGIN_API setStreamSize(int64 size) override {
+        data_.resize((size_t)size);
+        return kResultOk;
+    }
+    uint32 PLUGIN_API addRef()  override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (std::memcmp(iid, IBStream::iid,        sizeof(TUID)) == 0 ||
+            std::memcmp(iid, FUnknown::iid,        sizeof(TUID)) == 0) {
+            if (obj) *obj = static_cast<IBStream*>(this);
+            return kResultOk;
+        }
+        if (std::memcmp(iid, ISizeableStream::iid, sizeof(TUID)) == 0) {
+            if (obj) *obj = static_cast<ISizeableStream*>(this);
+            return kResultOk;
+        }
+        if (obj) *obj = nullptr;
+        return kNoInterface;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// ParamChangeSPSC – lock-free Single-Producer / Single-Consumer ring buffer
+//
+// Producer: UI/host thread (setParameter).
+// Consumer: audio thread (processAudio).
+//
+// Properties:
+//   - No heap allocation after construction.
+//   - No hash collisions (FIFO queue, not a direct-mapped cache).
+//   - If the queue is full, push() returns false; the latest value is still
+//     stored in lastSetValues so a subsequent setParameter() retries delivery.
+//   - head and tail are on separate cache lines to avoid false sharing.
+//   - Capacity is sized to accommodate full state restores on plugins with
+//     thousands of parameters (e.g. complex synthesizers) without overflow.
+// ---------------------------------------------------------------------------
+static constexpr size_t PARAM_QUEUE_CAPACITY = 8192;
+
+struct ParamChange {
+    uint32_t id;
+    double   value;
+};
+
+class ParamChangeSPSC {
+public:
+    bool push(uint32_t id, double value) {
+        size_t t    = tail.load(std::memory_order_relaxed);
+        size_t next = (t + 1u) % PARAM_QUEUE_CAPACITY;
+        if (next == head.load(std::memory_order_acquire))
+            return false; // full
+        buf[t] = {id, value};
+        tail.store(next, std::memory_order_release);
+        return true;
+    }
+
+    size_t popAll(ParamChange* out, size_t maxOut) {
+        size_t h     = head.load(std::memory_order_relaxed);
+        size_t t     = tail.load(std::memory_order_acquire);
+        size_t count = 0;
+        while (h != t && count < maxOut) {
+            out[count++] = buf[h];
+            h = (h + 1u) % PARAM_QUEUE_CAPACITY;
+        }
+        head.store(h, std::memory_order_release);
+        return count;
+    }
+
+private:
+    alignas(64) std::atomic<size_t> head{0};
+    alignas(64) std::atomic<size_t> tail{0};
+    alignas(64) ParamChange buf[PARAM_QUEUE_CAPACITY];
+};
+
+// ---------------------------------------------------------------------------
+// MidiEventSPSC – lock-free Single-Producer / Single-Consumer ring buffer
+// for MIDI events.
+//
+// Producer: UI/MIDI thread (processMidi).
+// Consumer: audio thread (processAudio).
+//
+// Events are queued here and drained at the start of each audio block so that
+// MIDI and audio always reach the plugin in a single process() call (VST3 spec).
+// ---------------------------------------------------------------------------
+static constexpr size_t MIDI_QUEUE_CAPACITY = 256;
+
+struct QueuedMidiEvent {
+    int32_t noteId;      // Unique per-voice ID for NoteOn/NoteOff pairing; -1 for CC/other
+    uint8_t status;
+    uint8_t data1;
+    uint8_t data2;
+    int32_t sampleOffset;
+};
+
+class MidiEventSPSC {
+public:
+    bool push(const QueuedMidiEvent& ev) {
+        size_t t    = tail.load(std::memory_order_relaxed);
+        size_t next = (t + 1u) % MIDI_QUEUE_CAPACITY;
+        if (next == head.load(std::memory_order_acquire))
+            return false; // full
+        buf[t] = ev;
+        tail.store(next, std::memory_order_release);
+        return true;
+    }
+
+    size_t popAll(QueuedMidiEvent* out, size_t maxOut) {
+        size_t h     = head.load(std::memory_order_relaxed);
+        size_t t     = tail.load(std::memory_order_acquire);
+        size_t count = 0;
+        while (h != t && count < maxOut) {
+            out[count++] = buf[h];
+            h = (h + 1u) % MIDI_QUEUE_CAPACITY;
+        }
+        head.store(h, std::memory_order_release);
+        return count;
+    }
+
+private:
+    alignas(64) std::atomic<size_t> head{0};
+    alignas(64) std::atomic<size_t> tail{0};
+    alignas(64) QueuedMidiEvent buf[MIDI_QUEUE_CAPACITY];
+};
+
+// ---------------------------------------------------------------------------
+
+#ifdef __linux__
+class LinuxRunLoop : public Linux::IRunLoop {
+public:
+    LinuxRunLoop() : refCount(1) {}
+    virtual ~LinuxRunLoop() {}
+
+    tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* handler, Linux::FileDescriptor fd) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        eventHandlers.push_back({handler, fd});
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* handler) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        eventHandlers.erase(
+            std::remove_if(eventHandlers.begin(), eventHandlers.end(),
+                [handler](const EventHandlerEntry& e) { return e.handler == handler; }),
+            eventHandlers.end());
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API registerTimer(Linux::ITimerHandler* handler, Linux::TimerInterval milliseconds) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        timerHandlers.push_back({handler, milliseconds, 0});
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* handler) override {
+        if (!handler) return kInvalidArgument;
+        std::lock_guard<std::mutex> lock(mutex);
+        timerHandlers.erase(
+            std::remove_if(timerHandlers.begin(), timerHandlers.end(),
+                [handler](const TimerHandlerEntry& e) { return e.handler == handler; }),
+            timerHandlers.end());
+        return kResultOk;
+    }
+
+    void processEvents(uint64 currentTimeMs) {
+        std::lock_guard<std::mutex> lock(mutex);
+
+        if (!eventHandlers.empty()) {
+            std::vector<struct pollfd> pollfds;
+            pollfds.reserve(eventHandlers.size());
+            for (const auto& entry : eventHandlers) {
+                struct pollfd pfd;
+                pfd.fd = entry.fd;
+                pfd.events = POLLIN;
+                pfd.revents = 0;
+                pollfds.push_back(pfd);
+            }
+            int result = poll(pollfds.data(), pollfds.size(), 0);
+            if (result > 0) {
+                for (size_t i = 0; i < pollfds.size(); ++i) {
+                    if (pollfds[i].revents & POLLIN)
+                        eventHandlers[i].handler->onFDIsSet(eventHandlers[i].fd);
+                }
+            }
+        }
+
+        for (auto& entry : timerHandlers) {
+            if (currentTimeMs - entry.lastCallTime >= entry.interval) {
+                entry.handler->onTimer();
+                entry.lastCallTime = currentTimeMs;
+            }
+        }
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, Linux::IRunLoop::iid) ||
+            FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = this;
+            addRef();
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override { return ++refCount; }
+    uint32 PLUGIN_API release() override {
+        uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    struct EventHandlerEntry { Linux::IEventHandler* handler; Linux::FileDescriptor fd; };
+    struct TimerHandlerEntry { Linux::ITimerHandler* handler; Linux::TimerInterval interval; uint64 lastCallTime; };
+
+    std::vector<EventHandlerEntry> eventHandlers;
+    std::vector<TimerHandlerEntry> timerHandlers;
+    std::mutex mutex;
+    std::atomic<uint32> refCount;
+};
+#endif
+
+class PlugFrame : public IPlugFrame
+#ifdef __linux__
+    , public Linux::IRunLoop
+#endif
+{
+public:
+    PlugFrame() : refCount(1) {
+#ifdef __linux__
+        runLoop = new LinuxRunLoop();
+#endif
+    }
+    virtual ~PlugFrame() {
+#ifdef __linux__
+        if (runLoop) runLoop->release();
+#endif
+    }
+
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* newSize) override {
+        if (!view || !newSize) return kInvalidArgument;
+        return kResultOk;
+    }
+
+#ifdef __linux__
+    tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* handler, Linux::FileDescriptor fd) override {
+        return runLoop ? runLoop->registerEventHandler(handler, fd) : kResultFalse;
+    }
+    tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* handler) override {
+        return runLoop ? runLoop->unregisterEventHandler(handler) : kResultFalse;
+    }
+    tresult PLUGIN_API registerTimer(Linux::ITimerHandler* handler, Linux::TimerInterval milliseconds) override {
+        return runLoop ? runLoop->registerTimer(handler, milliseconds) : kResultFalse;
+    }
+    tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* handler) override {
+        return runLoop ? runLoop->unregisterTimer(handler) : kResultFalse;
+    }
+    void processEvents(uint64 currentTimeMs) {
+        if (runLoop) runLoop->processEvents(currentTimeMs);
+    }
+#endif
+
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) ||
+            FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = this;
+            addRef();
+            return kResultOk;
+        }
+#ifdef __linux__
+        if (FUnknownPrivate::iidEqual(iid, Linux::IRunLoop::iid)) {
+            *obj = static_cast<Linux::IRunLoop*>(this);
+            addRef();
+            return kResultOk;
+        }
+#endif
+        *obj = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override { return ++refCount; }
+    uint32 PLUGIN_API release() override {
+        uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<uint32> refCount;
+#ifdef __linux__
+    LinuxRunLoop* runLoop = nullptr;
+#endif
+};
+
+// Forward declaration needed by OwnComponentHandler::performEdit.
+class Vst3PluginImpl;
+
+// IComponentHandler + IComponentHandler2.
+// IComponentHandler2 is required by JUCE-based hosts (T-Racks 6): they
+// dereference the QueryInterface result without checking the return code.
+// restartComponent only sets a flag so that processIdle() can safely call
+// updateParameters() from the UI thread later – touching AppKit or VST3 objects
+// from within the restartComponent callback can crash on macOS because the call
+// may arrive on a plugin-internal background thread.
+// performEdit is fully implemented after Vst3PluginImpl to allow calling
+// back into setParameter() which updates both the controller state and the
+// lock-free SPSC queue consumed by the audio thread.
+class OwnComponentHandler : public Steinberg::Vst::IComponentHandler,
+                            public Steinberg::Vst::IComponentHandler2 {
+public:
+    explicit OwnComponentHandler(Vst3PluginImpl* plugin) : refCount(1), pluginImpl(plugin) {}
+
+    Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API performEdit(Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) override;
+    Steinberg::tresult PLUGIN_API endEdit(Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API restartComponent(Steinberg::int32 flags) override;
+
+    void scheduleParameterRefresh() { pendingParamRefresh.store(true, std::memory_order_release); }
+    void scheduleIoRestart()        { pendingIoRestart.store(true,  std::memory_order_release); }
+    std::atomic<bool> pendingParamRefresh{false};
+    std::atomic<bool> pendingIoRestart{false};
+
+    Steinberg::tresult PLUGIN_API setDirty(Steinberg::TBool) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API requestOpenEditor(Steinberg::FIDString) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API startGroupEdit() override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API finishGroupEdit() override { return Steinberg::kResultOk; }
+
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID _iid, void** obj) override {
+        if (Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::Vst::IComponentHandler::iid) ||
+            Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::FUnknown::iid)) {
+            *obj = static_cast<Steinberg::Vst::IComponentHandler*>(this);
+            addRef();
+            return Steinberg::kResultOk;
+        }
+        if (Steinberg::FUnknownPrivate::iidEqual(_iid, Steinberg::Vst::IComponentHandler2::iid)) {
+            *obj = static_cast<Steinberg::Vst::IComponentHandler2*>(this);
+            addRef();
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+
+    Steinberg::uint32 PLUGIN_API addRef() override { return ++refCount; }
+    Steinberg::uint32 PLUGIN_API release() override {
+        Steinberg::uint32 r = --refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+private:
+    std::atomic<Steinberg::uint32> refCount;
+    Vst3PluginImpl* pluginImpl;
+};
+
+class Vst3PluginImpl : public FObject {
+public:
+    Vst3PluginImpl() : sampleRate(44100.0), blockSize(512) {
+        for (auto& id : activeNoteIds)
+            id.store(-1, std::memory_order_relaxed);
+    }
+    ~Vst3PluginImpl() { unloadPlugin(); }
+
+    bool loadPlugin(const std::string& pluginPath) {
+#ifdef __APPLE__
+        if (!pthread_main_np()) {
+            struct Ctx { Vst3PluginImpl* self; const std::string* path; bool result; };
+            Ctx ctx{this, &pluginPath, false};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->result = c->self->loadPlugin(*c->path);
+            }, &ctx);
+            return ctx.result;
+        }
+#endif
+        try {
+            std::string error;
+            module = VST3::Hosting::Module::create(pluginPath, error);
+            if (!module) {
+                std::cerr << "Failed to load VST3 module: " << pluginPath << std::endl;
+                return false;
+            }
+
+            factory = module->getFactory().get();
+            if (!factory || factory->countClasses() == 0) {
+                std::cerr << "Failed to create factory interface" << std::endl;
+                return false;
+            }
+
+            FUID componentID, controllerID;
+            std::string componentName;
+
+            if (!findComponentAndControllerIDs(factory, componentID, controllerID, componentName)) {
+                std::cerr << "No suitable components found in VST3 module" << std::endl;
+                return false;
+            }
+
+            tresult result = factory->createInstance(componentID, IComponent::iid, (void**)&component);
+            if (result != kResultOk || !component) {
+                std::cerr << "Component creation failed" << std::endl;
+                return false;
+            }
+
+            if (component->initialize(&hostApp) != kResultOk) {
+                std::cerr << "Component initialization failed" << std::endl;
+                return false;
+            }
+
+            if (controllerID.isValid()) {
+                result = factory->createInstance(controllerID, IEditController::iid, (void**)&controller);
+                if (result != kResultOk || !controller) {
+                    FUnknownPtr<IEditController> compController(component);
+                    if (compController) {
+                        controller = compController;
+                    } else {
+                        TUID tuid;
+                        if (component->getControllerClassId(tuid) == kResultOk) {
+                            FUID iid(tuid);
+                            if (iid.isValid())
+                                factory->createInstance(tuid, IEditController::iid, (void**)&controller);
+                        }
+                    }
+                }
+
+                if (controller) {
+                    controller->initialize(&hostApp);
+
+                    componentHandler = new OwnComponentHandler(this);
+                    componentHandler->addRef();
+                    if (controller->setComponentHandler(componentHandler) != kResultOk)
+                        std::cerr << "setComponentHandler failed (non-fatal)" << std::endl;
+
+                    connectComponentAndController();
+                }
+            }
+
+            processor = FUnknownPtr<IAudioProcessor>(component);
+            if (!processor) {
+                std::cerr << "Plugin does not implement IAudioProcessor interface" << std::endl;
+                return false;
+            }
+
+            setupProcessing();
+
+            if (component->setActive(true) != kResultOk) {
+                std::cerr << "Component activation failed" << std::endl;
+                return false;
+            }
+            isActive.store(true, std::memory_order_release);
+
+            updateParameters();
+
+            std::cout << "VST3 plugin loaded successfully: " << componentName << std::endl;
+            return true;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Error occurred while loading plugin: " << e.what() << std::endl;
+            return false;
+        }
+    }
+
+    void unloadPlugin() {
+        try {
+#ifdef __APPLE__
+            if (editorNSViewHandle) {
+                OwnVst3_CloseChildWindows(editorNSViewHandle);
+                editorNSViewHandle = nullptr;
+            }
+            if (idleTimer) {
+                CFRunLoopTimerInvalidate(idleTimer);
+                CFRelease(idleTimer);
+                idleTimer = nullptr;
+            }
+#endif
+            if (view) {
+                view->setFrame(nullptr);
+                view->removed();
+                view = nullptr;
+            }
+            if (plugFrame) {
+                plugFrame->release();
+                plugFrame = nullptr;
+            }
+
+            if (component && isActive.load(std::memory_order_acquire)) {
+                try { component->setActive(false); } catch (...) {}
+                isActive.store(false, std::memory_order_release);
+            }
+
+            if (componentHandler) {
+                componentHandler->release();
+                componentHandler = nullptr;
+            }
+
+            view = nullptr;
+            processor = nullptr;
+            controller = nullptr;
+            component = nullptr;
+            factory = nullptr;
+            module = nullptr;
+        }
+        catch (...) {}
+    }
+
+    bool createEditor(void* windowHandle) {
+        if (!controller) return false;
+
+        view = controller->createView(ViewType::kEditor);
+        if (!view) {
+            std::cerr << "Failed to create editor" << std::endl;
+            return false;
+        }
+
+        if (!plugFrame)
+            plugFrame = new PlugFrame();
+        view->setFrame(plugFrame);
+
+#ifdef _WIN32
+        // Steinberg spec: setContentScaleFactor must be called BEFORE attached()
+        // so that HiDPI-aware plugins (IPlugViewContentScaleSupport, e.g. TDR Nova)
+        const auto platformType = kPlatformTypeHWND;
+#elif defined(__APPLE__)
+        const auto platformType = kPlatformTypeNSView;
+#elif defined(__linux__)
+        const auto platformType = kPlatformTypeX11EmbedWindowID;
+#else
+        #error "Unsupported platform"
+#endif
+        if (view->attached(windowHandle, platformType) != kResultOk) {
+            std::cerr << "Failed to attach editor to window" << std::endl;
+            view->setFrame(nullptr);
+            view = nullptr;
+            return false;
+        }
+
+#ifdef _WIN32
+        // JUCE bug workaround: Steinberg spec says setContentScaleFactor should be called
+        // BEFORE attached(), but some JUCE plugins (e.g. TDR Nova) crash with an access
+        // violation (0xC0000005) inside their WndProc if we do it before attached().
+        // Setting it AFTER attached() still works for DPI scaling but avoids the crash.
+        {
+            FUnknownPtr<IPlugViewContentScaleSupport> scaleSupport(view);
+            if (scaleSupport) {
+                float scaleFactor = 1.0f;
+                HMODULE user32 = GetModuleHandleA("user32.dll");
+                if (user32) {
+                    typedef UINT (WINAPI* GetDpiForWindowFn)(HWND);
+                    auto fn = reinterpret_cast<GetDpiForWindowFn>(
+                        GetProcAddress(user32, "GetDpiForWindow"));
+                    if (fn) {
+                        UINT dpi = fn(reinterpret_cast<HWND>(windowHandle));
+                        if (dpi > 0)
+                            scaleFactor = static_cast<float>(dpi) / 96.0f;
+                    }
+                }
+                scaleSupport->setContentScaleFactor(scaleFactor);
+            }
+        }
+#endif
+
+
+        // Re-sync controller parameters after editor attach. Some plugins reset
+        // their UI to the processor's current state during createView/attached,
+        // overwriting any prior setParamNormalized calls. Re-applying lastSetValues
+        // ensures the editor displays the host-authoritative parameter state.
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            for (auto& [id, val] : lastSetValues)
+                controller->setParamNormalized(id, val);
+        }
+
+#ifdef __APPLE__
+        editorNSViewHandle = windowHandle;
+
+        if (!idleTimer) {
+            CFRunLoopTimerContext context = {0, this, nullptr, nullptr, nullptr};
+            idleTimer = CFRunLoopTimerCreate(
+                kCFAllocatorDefault,
+                CFAbsoluteTimeGetCurrent() + MACOS_IDLE_TIMER_INTERVAL,
+                MACOS_IDLE_TIMER_INTERVAL,
+                0, 0,
+                [](CFRunLoopTimerRef, void* info) {
+                    static_cast<Vst3PluginImpl*>(info)->processIdle();
+                },
+                &context);
+            if (idleTimer)
+                CFRunLoopAddTimer(CFRunLoopGetMain(), idleTimer, kCFRunLoopCommonModes);
+        }
+#endif
+        return true;
+    }
+
+    void closeEditor() {
+#ifdef __APPLE__
+        if (idleTimer) {
+            CFRunLoopTimerInvalidate(idleTimer);
+            CFRelease(idleTimer);
+            idleTimer = nullptr;
+        }
+        if (editorNSViewHandle) {
+            OwnVst3_CloseChildWindows(editorNSViewHandle);
+            editorNSViewHandle = nullptr;
+        }
+#endif
+        if (view) {
+            view->setFrame(nullptr);
+            view->removed();
+            view = nullptr;
+        }
+        if (plugFrame) {
+            plugFrame->release();
+            plugFrame = nullptr;
+        }
+    }
+
+    void resizeEditor(int width, int height) {
+        if (view) {
+            ViewRect viewRect(0, 0, width, height);
+            view->onSize(&viewRect);
+        }
+    }
+
+    bool getEditorSize(int& width, int& height) {
+        if (view) {
+            ViewRect rect;
+            if (view->getSize(&rect) == kResultOk) {
+                width = rect.getWidth();
+                height = rect.getHeight();
+                return true;
+            }
+        }
+        if (controller) {
+            IPlugView* tempView = controller->createView(ViewType::kEditor);
+            if (tempView) {
+                ViewRect rect;
+                if (tempView->getSize(&rect) == kResultOk) {
+                    width = rect.getWidth();
+                    height = rect.getHeight();
+                    tempView->release();
+                    return true;
+                }
+                tempView->release();
+            }
+        }
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    bool initialize(double newSampleRate, int newBlockSize) {
+        if (!processor) return false;
+
+        sampleRate = newSampleRate;
+        blockSize  = newBlockSize;
+
+        if (isActive.load(std::memory_order_acquire) && component) {
+            component->setActive(false);
+            isActive.store(false, std::memory_order_release);
+        }
+
+        bool result = setupProcessing();
+
+        if (result && component && component->setActive(true) == kResultOk)
+            isActive.store(true, std::memory_order_release);
+
+        return result && isActive.load(std::memory_order_acquire);
+    }
+
+    bool setupProcessing() {
+        if (!processor) return false;
+
+        numInputBuses  = component->getBusCount(kAudio, kInput);
+        numOutputBuses = component->getBusCount(kAudio, kOutput);
+
+        if (numInputBuses > 0 || numOutputBuses > 0) {
+            SpeakerArrangement stereo = SpeakerArr::kStereo;
+            SpeakerArrangement mono   = SpeakerArr::kMono;
+
+            std::vector<SpeakerArrangement> inputArr(numInputBuses,  stereo);
+            std::vector<SpeakerArrangement> outputArr(numOutputBuses, stereo);
+
+            tresult busResult = processor->setBusArrangements(
+                inputArr.data(),  numInputBuses,
+                outputArr.data(), numOutputBuses);
+
+            if (busResult != kResultOk) {
+                std::fill(inputArr.begin(), inputArr.end(), mono);
+                processor->setBusArrangements(
+                    inputArr.data(),  numInputBuses,
+                    outputArr.data(), numOutputBuses);
+            }
+        }
+
+        // Only count channels on the PRIMARY bus (index 0).
+        // Secondary buses (sidechain, aux) are deactivated – their channel
+        // count must NOT be summed here. Doing so produced e.g. 4 for a
+        // stereo-main + stereo-sidechain plugin, which caused the C# host's
+        // bypass guard (numChannels != actualIn) to fire on every call, making
+        // the plugin completely silent even though processing was set up correctly.
+        actualInputChannels  = 0;
+        actualOutputChannels = 0;
+        if (numInputBuses > 0) {
+            BusInfo info = {};
+            if (component->getBusInfo(kAudio, kInput, 0, info) == kResultOk)
+                actualInputChannels = info.channelCount;
+        }
+        if (numOutputBuses > 0) {
+            BusInfo info = {};
+            if (component->getBusInfo(kAudio, kOutput, 0, info) == kResultOk)
+                actualOutputChannels = info.channelCount;
+        }
+
+        // Activate only the primary bus (index 0).
+        // Secondary buses (sidechain, aux) are deactivated because we have no
+        // audio data to supply for them. The plugin must not access buffers for
+        // inactive buses per the VST3 spec.
+        if (numInputBuses > 0)
+            component->activateBus(kAudio, kInput, 0, true);
+        for (int i = 1; i < numInputBuses; ++i)
+            component->activateBus(kAudio, kInput, i, false);
+
+        if (numOutputBuses > 0)
+            component->activateBus(kAudio, kOutput, 0, true);
+        for (int i = 1; i < numOutputBuses; ++i)
+            component->activateBus(kAudio, kOutput, i, false);
+
+        // Activate the primary Event (MIDI) input bus for instruments.
+        // Without this, VST instruments ignore all incoming MIDI events.
+        numEventInputBuses = component->getBusCount(kEvent, kInput);
+        if (numEventInputBuses > 0) {
+            component->activateBus(kEvent, kInput, 0, true);
+            for (int i = 1; i < numEventInputBuses; ++i)
+                component->activateBus(kEvent, kInput, i, false);
+        }
+
+        ProcessSetup setup;
+        setup.processMode        = kRealtime;
+        setup.symbolicSampleSize = kSample32;
+        setup.maxSamplesPerBlock = blockSize;
+        setup.sampleRate         = sampleRate;
+
+        if (processor->setupProcessing(setup) != kResultOk) {
+            std::cerr << "Failed to setup processing" << std::endl;
+            return false;
+        }
+
+        processContextRequirements = 0;
+        {
+            FUnknownPtr<IProcessContextRequirements> pcr(processor);
+            if (pcr)
+                processContextRequirements = pcr->getProcessContextRequirements();
+        }
+
+        // Pre-allocate bus buffer arrays (no heap on audio thread).
+        inBusBuffers.assign(numInputBuses,   AudioBusBuffers{});
+        outBusBuffers.assign(numOutputBuses, AudioBusBuffers{});
+
+        // Pre-allocate a stereo silent buffer for secondary/sidechain buses.
+        // Even though those buses are deactivated, we provide valid (zero-filled)
+        // pointers to guard against buggy plugins that still read inactive buses.
+        int safeBlock = std::max(1, blockSize);
+        silentBuffer.assign(static_cast<size_t>(safeBlock) * 2, 0.0f);
+        silentChannelPtrs[0] = silentBuffer.data();
+        silentChannelPtrs[1] = silentBuffer.data() + safeBlock;
+
+        // Pre-allocate parameter change queue slots.
+        inputParamChanges.setMaxParameters(static_cast<int32>(PARAM_QUEUE_CAPACITY));
+        outputParamChanges.setMaxParameters(static_cast<int32>(PARAM_QUEUE_CAPACITY));
+
+        // Pre-allocate the MIDI EventList so processAudio() can drain the SPSC
+        // queue without any heap allocation. clear() only resets fillCount = 0.
+        preAllocEventList.setMaxSize(static_cast<int32>(MIDI_QUEUE_CAPACITY));
+
+        // Reset per-pitch noteId tracking. Use a store loop because
+        // std::atomic<int32_t> is not copyable, so fill() does not work.
+        for (auto& id : activeNoteIds)
+            id.store(-1, std::memory_order_relaxed);
+
+        return true;
+    }
+
+
+    std::vector<Vst3Parameter> getParameters() {
+        updateParameters();
+        return parameters;
+    }
+
+    void updateParameters() {
+        parameters.clear();
+        if (!controller) return;
+
+        int count = controller->getParameterCount();
+
+        std::lock_guard<std::mutex> lock(paramMutex);
+        for (int i = 0; i < count; i++) {
+            ParameterInfo info;
+            if (controller->getParameterInfo(i, info) == kResultOk) {
+                Vst3Parameter param;
+                param.id           = info.id;
+                param.name         = tchar_to_utf8(info.title);
+                param.minValue     = 0.0;
+                param.maxValue     = 1.0;
+                param.defaultValue = info.defaultNormalizedValue;
+                param.currentValue = controller->getParamNormalized(info.id);
+                parameters.push_back(param);
+
+                lastSetValues[static_cast<uint32_t>(info.id)] = param.currentValue;
+            }
+        }
+    }
+
+    int getParameterCount() const {
+        return controller ? controller->getParameterCount() : 0;
+    }
+
+    /// Reads a single parameter by index and fills outParam.
+    /// Current value is read from the host-side lastSetValues cache to avoid
+    /// calling controller->getParamNormalized(), which can deadlock with the audio
+    /// thread on plugins that share an internal mutex between controller and processor.
+    bool getParameterInfo(int index, Vst3Parameter& outParam) {
+        if (!controller) return false;
+
+        ParameterInfo info;
+        if (controller->getParameterInfo(index, info) != kResultOk)
+            return false;
+
+        outParam.id           = info.id;
+        outParam.name         = tchar_to_utf8(info.title);
+        outParam.minValue     = 0.0;
+        outParam.maxValue     = 1.0;
+        outParam.defaultValue = info.defaultNormalizedValue;
+
+        bool hasCached = false;
+        double cached  = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            auto it = lastSetValues.find(static_cast<uint32_t>(info.id));
+            if (it != lastSetValues.end()) {
+                hasCached = true;
+                cached    = it->second;
+            }
+        }
+        outParam.currentValue = hasCached ? cached : controller->getParamNormalized(info.id);
+        return true;
+    }
+
+    /// Delivers a parameter change to the audio thread via the lock-free SPSC queue.
+    /// Also caches the value in lastSetValues so getParameter() returns the correct
+    /// value immediately without querying the controller, which can deadlock with the
+    /// audio thread on plugins that share an internal mutex between controller and processor.
+    /// If the queue is full, the value is already in lastSetValues and will be retried
+    /// on the next setParameter() call.
+    bool setParameter(int paramId, double value) {
+        if (!controller) return false;
+
+        uint32_t uid = static_cast<uint32_t>(paramId);
+
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            lastSetValues[uid] = value;
+        }
+
+#ifdef __APPLE__
+        if (!pthread_main_np()) {
+            struct Ctx { IEditController* ctrl; uint32_t id; double val; };
+            Ctx ctx{controller, uid, value};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->ctrl->setParamNormalized(c->id, c->val);
+            }, &ctx);
+        } else {
+            controller->setParamNormalized(uid, value);
+        }
+#else
+        controller->setParamNormalized(uid, value);
+#endif
+
+        if (!paramQueue.push(uid, value))
+            std::cerr << "Parameter queue full – change for id=" << uid << " dropped (audio thread backpressure)" << std::endl;
+
+        return true;
+    }
+
+    /// Returns the most recently set value for the given parameter ID.
+    /// Reads from the host-side lastSetValues cache to avoid calling
+    /// controller->getParamNormalized(), which acquires the plugin's internal mutex
+    /// and can deadlock with the audio thread. Falls back to the controller for
+    /// parameters not yet explicitly set by the host.
+    double getParameter(int paramId) {
+        uint32_t uid = static_cast<uint32_t>(paramId);
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            auto it = lastSetValues.find(uid);
+            if (it != lastSetValues.end())
+                return it->second;
+        }
+        if (controller) return controller->getParamNormalized(paramId);
+        return 0.0;
+    }
+
+    bool processAudio(AudioBuffer& buffer) {
+        if (!processor) return false;
+        if (!isActive.load(std::memory_order_acquire)) return false;
+
+        // Try to acquire the process mutex. If getState() is currently flushing
+        // parameters via a zero-sample process() call, skip this block silently
+        // rather than running two process() calls concurrently (not thread-safe).
+        std::unique_lock<std::mutex> procLock(audioProcessMutex, std::try_to_lock);
+        if (!procLock.owns_lock()) return true;
+
+        ProcessData data = {};
+        data.numSamples = buffer.numSamples;
+
+        // Update the pre-allocated bus buffer arrays (no heap allocation).
+        if (numInputBuses > 0) {
+            inBusBuffers[0].numChannels      = buffer.numChannels;
+            inBusBuffers[0].channelBuffers32 = buffer.inputs;
+            inBusBuffers[0].silenceFlags     = 0;
+        }
+        // Secondary input buses (sidechain, aux) are deactivated. Provide silent,
+        // valid pointers as a safety guard against buggy plugins.
+        for (int i = 1; i < numInputBuses; ++i) {
+            inBusBuffers[i].numChannels      = 2;
+            inBusBuffers[i].channelBuffers32 = silentChannelPtrs;
+            inBusBuffers[i].silenceFlags     = 0xFFFFFFFFFFFFFFFFull;
+        }
+
+        if (numOutputBuses > 0) {
+            outBusBuffers[0].numChannels      = buffer.numChannels;
+            outBusBuffers[0].channelBuffers32 = buffer.outputs;
+            outBusBuffers[0].silenceFlags     = 0;
+        }
+        for (int i = 1; i < numOutputBuses; ++i) {
+            outBusBuffers[i].numChannels      = 2;
+            outBusBuffers[i].channelBuffers32 = silentChannelPtrs;
+            outBusBuffers[i].silenceFlags     = 0;
+        }
+
+        data.inputs     = numInputBuses  > 0 ? inBusBuffers.data()  : nullptr;
+        data.outputs    = numOutputBuses > 0 ? outBusBuffers.data() : nullptr;
+        data.numInputs  = numInputBuses;
+        data.numOutputs = numOutputBuses;
+
+        data.processMode        = kRealtime;
+        data.symbolicSampleSize = kSample32;
+
+        double localSamplePos = currentSamplePos.load(std::memory_order_relaxed);
+        double localBpm       = currentBpm.load(std::memory_order_relaxed);
+        bool   localPlaying   = isTransportPlaying.load(std::memory_order_relaxed);
+
+        // Always fill all ProcessContext fields regardless of IProcessContextRequirements.
+        // JUCE-based plugins internally access fields they did not declare, reading
+        // uninitialised values if we use selective filling – which causes distortion.
+        ProcessContext ctx = {};
+        ctx.state = ProcessContext::kTempoValid
+                  | ProcessContext::kTimeSigValid
+                  | ProcessContext::kProjectTimeMusicValid
+                  | ProcessContext::kBarPositionValid;
+        if (localPlaying) ctx.state |= ProcessContext::kPlaying;
+        ctx.sampleRate         = sampleRate;
+        ctx.projectTimeSamples = static_cast<int64>(localSamplePos);
+        ctx.tempo              = localBpm;
+        ctx.timeSigNumerator   = 4;
+        ctx.timeSigDenominator = 4;
+        ctx.projectTimeMusic   = (localSamplePos / sampleRate) * (localBpm / 60.0);
+        ctx.barPositionMusic   = 0.0;
+        data.processContext    = &ctx;
+
+        // Drain parameter changes from the SPSC queue.
+        // No mutex needed: this is the sole consumer (audio thread).
+        // clearQueue() resets used-count without freeing memory.
+        inputParamChanges.clearQueue();
+        {
+            ParamChange changes[PARAM_QUEUE_CAPACITY];
+            size_t numChanges = paramQueue.popAll(changes, PARAM_QUEUE_CAPACITY);
+            for (size_t ci = 0; ci < numChanges; ++ci) {
+                int32 idx = 0;
+                IParamValueQueue* q = inputParamChanges.addParameterData(
+                    static_cast<ParamID>(changes[ci].id), idx);
+                if (q) {
+                    int32 pointIndex = 0;
+                    q->addPoint(0, changes[ci].value, pointIndex);
+                }
+            }
+        }
+        data.inputParameterChanges = &inputParamChanges;
+
+        outputParamChanges.clearQueue();
+        data.outputParameterChanges = &outputParamChanges;
+
+        // Drain MIDI events from the lock-free SPSC queue and build the EventList.
+        // preAllocEventList was pre-allocated in setupProcessing(); clear() only
+        // resets fillCount – no heap activity on the audio thread.
+        preAllocEventList.clear();
+        {
+            size_t numMidi = midiQueue.popAll(midiScratch, MIDI_QUEUE_CAPACITY);
+            for (size_t mi = 0; mi < numMidi; ++mi) {
+                const QueuedMidiEvent& qev = midiScratch[mi];
+                Event e = {};
+                e.busIndex     = 0;
+                e.sampleOffset = qev.sampleOffset;
+                e.ppqPosition  = 0.0;
+
+                uint8_t msgType = qev.status & 0xF0;
+                if (msgType == 0x90 && qev.data2 > 0) {
+                    e.type            = Event::kNoteOnEvent;
+                    e.noteOn.channel  = qev.status & 0x0F;
+                    e.noteOn.pitch    = qev.data1;
+                    e.noteOn.velocity = qev.data2 / 127.0f;
+                    e.noteOn.length   = 0;
+                    e.noteOn.tuning   = 0.0f;
+                    e.noteOn.noteId   = qev.noteId;
+                } else if (msgType == 0x80 || (msgType == 0x90 && qev.data2 == 0)) {
+                    e.type             = Event::kNoteOffEvent;
+                    e.noteOff.channel  = qev.status & 0x0F;
+                    e.noteOff.pitch    = qev.data1;
+                    e.noteOff.velocity = qev.data2 / 127.0f;
+                    e.noteOff.tuning   = 0.0f;
+                    e.noteOff.noteId   = qev.noteId;
+                } else if (msgType == 0xB0) {
+                    e.type                    = Event::kLegacyMIDICCOutEvent;
+                    e.midiCCOut.channel       = static_cast<Steinberg::int8>(qev.status & 0x0F);
+                    e.midiCCOut.controlNumber = static_cast<Steinberg::uint8>(qev.data1);
+                    // LegacyMIDICCOutEvent::value is int8 in [0, 127] – do NOT normalise.
+                    e.midiCCOut.value         = static_cast<Steinberg::int8>(qev.data2);
+                } else {
+                    continue; // skip unsupported message types
+                }
+                preAllocEventList.addEvent(e);
+            }
+        }
+        data.inputEvents = &preAllocEventList;
+
+
+        if (processor->process(data) != kResultOk) {
+            std::cerr << "Error during audio processing" << std::endl;
+            return false;
+        }
+
+        currentSamplePos.store(localSamplePos + data.numSamples, std::memory_order_relaxed);
+
+        // Output parameter changes (plugin → host automation read-back) are
+        // intentionally not fed back into the input queue. Doing so creates an
+        // infinite feedback loop that floods the main thread and freezes the UI.
+
+        return true;
+    }
+
+    // Queues MIDI events for delivery to the plugin during the next processAudio() call.
+    // Per the VST3 specification, audio buffers and events MUST be passed together in a
+    // single process() invocation; calling process() with numSamples==0 is non-compliant
+    // and silently ignored by many plugins (especially JUCE-based instruments).
+    //
+    // This method is called from the UI/MIDI thread and is allocation-free:
+    // events are written into the MidiEventSPSC ring buffer without any heap activity.
+    bool processMidi(const MidiEvent* events, int count) {
+        if (!processor || !events || count <= 0) return false;
+
+        bool anyDropped = false;
+        for (int i = 0; i < count; ++i) {
+            const MidiEvent& ev = events[i];
+            QueuedMidiEvent qev = {};
+            qev.status      = static_cast<uint8_t>(ev.status);
+            qev.data1       = static_cast<uint8_t>(ev.data1);
+            qev.data2       = static_cast<uint8_t>(ev.data2);
+            qev.sampleOffset = ev.sampleOffset;
+
+            uint8_t msgType = qev.status & 0xF0;
+            uint8_t pitch   = qev.data1 & 0x7F;
+
+            if (msgType == 0x90 && qev.data2 > 0) {
+                // NoteOn: assign a new unique noteId and remember it per pitch
+                // so the matching NoteOff can reference the same voice.
+                int32_t id = nextNoteId.fetch_add(1, std::memory_order_relaxed) & 0x7FFFFFFF;
+                activeNoteIds[pitch].store(id, std::memory_order_relaxed);
+                qev.noteId = id;
+            } else if (msgType == 0x80 || (msgType == 0x90 && qev.data2 == 0)) {
+                // NoteOff (or NoteOn velocity 0): pair with the stored noteId.
+                qev.noteId = activeNoteIds[pitch].exchange(-1, std::memory_order_relaxed);
+            } else {
+                qev.noteId = -1; // CC, pitch bend, etc.
+            }
+
+            if (!midiQueue.push(qev))
+                anyDropped = true;
+        }
+
+        if (anyDropped)
+            std::cerr << "MIDI queue full – some events dropped (audio thread backpressure)" << std::endl;
+
+        // Always return true: events are queued and will be delivered during
+        // the next processAudio() call, which is the correct VST3 behaviour.
+        return true;
+    }
+
+
+    // Serializes the processor state into a heap-allocated byte buffer.
+    // The caller must free the buffer with freeStateData().
+    bool getState(uint8_t** outData, int* outLen) {
+        if (!component || !outData || !outLen) return false;
+#ifdef __APPLE__
+        // Many macOS VST3 plugins touch AppKit during getState and require the
+        // main thread. The plugin thread (PostCommand) is a background thread,
+        // so we dispatch back to the main thread synchronously — mirroring the
+        // same pattern used in loadPlugin().
+        if (!pthread_main_np()) {
+            struct Ctx { Vst3PluginImpl* self; uint8_t** outData; int* outLen; bool result; };
+            Ctx ctx{this, outData, outLen, false};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->result = c->self->getState(c->outData, c->outLen);
+            }, &ctx);
+            return ctx.result;
+        }
+#endif
+        updateParameters();
+
+        // NOTE: We do NOT attempt to flush pending parameter changes via a
+        // process(numSamples=0) call here. The VST3 specification explicitly
+        // states that the host must not call process() with numSamples=0.
+        // Pending changes in paramQueue will reach the processor via the next
+        // regular processAudio() block. In practice, a DAW always runs at least
+        // one process block after transport stop before requesting state, so
+        // this is not an observable issue for the vast majority of use cases.
+
+        // Capture processor state. Try IComponent::getState() first; if it
+        // returns nothing fall back to IEditController::getState(). Some plugins
+        // (e.g. Voxengo) store their serialisable state in the controller rather
+        // than the component, so the controller blob is the authoritative source.
+        //
+        // NOTE: We intentionally do NOT flush lastSetValues to the processor via
+        // process(numSamples=0) here. lastSetValues is populated from
+        // controller->getParamNormalized() which may return stale default values
+        // for plugins that update their DSP directly from the editor without calling
+        // performEdit(). Flushing stale defaults would overwrite the plugin's own
+        // correctly-set DSP state, causing getState() to serialise those defaults.
+        MemoryIBStreamImpl stream;
+        component->getState(&stream);
+
+        if (stream.data_.empty() && controller) {
+            // Component returned nothing – try the controller's own persistent state.
+            controller->getState(&stream);
+        }
+
+        if (stream.data_.empty()) return false;
+        *outLen  = (int)stream.data_.size();
+        *outData = new uint8_t[*outLen];
+        std::memcpy(*outData, stream.data_.data(), *outLen);
+        return true;
+    }
+
+    /// Restores the processor state from a binary blob and synchronises all
+    /// dependent subsystems:
+    ///   1. Applies the blob to the IComponent via setState.
+    ///   2. Forwards the blob to the IEditController via setComponentState so
+    ///      the editor UI reflects the restored values.
+    ///   3. Calls updateParameters() to refresh the host-side lastSetValues cache
+    ///      so that subsequent getParameter() and project-save snapshots return
+    ///      the loaded values rather than stale defaults.
+    ///   4. Pushes every entry in lastSetValues into the lock-free SPSC paramQueue
+    ///      so the audio thread receives the restored values before the next
+    ///      processAudio() block – without this step, JUCE-based plugins that read
+    ///      parameters during process() would revert to defaults because the queue
+    ///      was empty and the controller-side update alone does not reach the processor.
+    /// On macOS, the call is dispatched synchronously to the main thread because
+    /// many plugins touch AppKit during setState.
+    bool setState(const uint8_t* data, int len) {
+        if (!component || !data || len <= 0) return false;
+#ifdef __APPLE__
+        if (!pthread_main_np()) {
+            struct Ctx { Vst3PluginImpl* self; const uint8_t* data; int len; bool result; };
+            Ctx ctx{this, data, len, false};
+            OwnVst3_DispatchSyncMainThread([](void* p) {
+                auto* c = static_cast<Ctx*>(p);
+                c->result = c->self->setState(c->data, c->len);
+            }, &ctx);
+            return ctx.result;
+        }
+#endif
+        // Apply blob to the component. Some plugins (e.g. Voxengo) store their
+        // state in the controller (via IEditController::getState) rather than in
+        // the component, so component->setState() may return kResultFalse for a
+        // controller-origin blob. We continue regardless and let the controller
+        // path below handle it.
+        {
+            MemoryIBStreamImpl stream(data, len);
+            component->setState(&stream);
+        }
+        if (controller) {
+            // Standard sync: push component state to controller UI.
+            MemoryIBStreamImpl ctrlStream(data, len);
+            controller->setComponentState(&ctrlStream);
+
+            // Also restore the controller's own persistent state with the same
+            // blob. For plugins that saved via IEditController::getState() this
+            // is the authoritative restore path; for others it is a no-op.
+            MemoryIBStreamImpl ctrlOwnStream(data, len);
+            controller->setState(&ctrlOwnStream);
+        }
+        updateParameters();
+        {
+            std::lock_guard<std::mutex> lock(paramMutex);
+            for (const auto& kv : lastSetValues)
+                paramQueue.push(kv.first, kv.second);
+        }
+        return true;
+    }
+
+    static void freeStateData(uint8_t* data) { delete[] data; }
+
+    bool isInstrument() {
+        if (!component) return false;
+        return component->getBusCount(kEvent, kInput) > 0 &&
+               component->getBusCount(kAudio, kOutput) > 0;
+    }
+
+    bool isEffect() {
+        if (!component) return false;
+        return component->getBusCount(kAudio, kInput) > 0 &&
+               component->getBusCount(kAudio, kOutput) > 0;
+    }
+
+    bool isMidiOnly() {
+        if (!component) return false;
+        return component->getBusCount(kEvent, kInput) > 0 &&
+               component->getBusCount(kAudio, kOutput) == 0;
+    }
+
+    std::string getName() {
+        if (!component || !factory) return "";
+        PClassInfo classInfo;
+        for (int32 i = 0; i < factory->countClasses(); i++) {
+            if (factory->getClassInfo(i, &classInfo) == kResultOk &&
+                strcmp(classInfo.category, kVstAudioEffectClass) == 0)
+                return classInfo.name;
+        }
+        return module ? module->getName() : "";
+    }
+
+    std::string getVendor() {
+        if (!factory) return "";
+        PFactoryInfo factoryInfo;
+        if (factory->getFactoryInfo(&factoryInfo) == kResultOk)
+            return factoryInfo.vendor;
+        return "";
+    }
+
+    std::string getVersion() {
+        if (!factory) return "";
+        IPluginFactory2* factory2 = nullptr;
+        if (factory->queryInterface(IPluginFactory2::iid, (void**)&factory2) == kResultOk && factory2) {
+            PClassInfo2 classInfo2;
+            for (int32 i = 0; i < factory2->countClasses(); i++) {
+                if (factory2->getClassInfo2(i, &classInfo2) == kResultOk &&
+                    strcmp(classInfo2.category, kVstAudioEffectClass) == 0) {
+                    factory2->release();
+                    return classInfo2.version;
+                }
+            }
+            factory2->release();
+        }
+        return "1.0.0";
+    }
+
+    std::string getPluginInfo() {
+        std::string info;
+        info += "Name: " + getName() + "\n";
+        info += "Vendor: " + getVendor() + "\n";
+        if (component) {
+            int numInputs  = component->getBusCount(kAudio, kInput);
+            int numOutputs = component->getBusCount(kAudio, kOutput);
+            info += "Audio buses: " + std::to_string(numInputs) + " input(s), " +
+                    std::to_string(numOutputs) + " output(s)\n";
+            info += std::string("MIDI input: ") +
+                    (component->getBusCount(kEvent, kInput) > 0 ? "Yes" : "No") + "\n";
+        }
+        return info;
+    }
+
+    void processIdle() {
+        // Deferred restartComponent handlers – always executed on the UI thread.
+        if (componentHandler) {
+            // kIoChanged / kReloadComponent: re-negotiate bus layout and reactivate.
+            if (componentHandler->pendingIoRestart.exchange(false, std::memory_order_acq_rel)) {
+                const double sr = sampleRate;
+                const int    bs = blockSize;
+                if (isActive.load(std::memory_order_acquire) && component) {
+                    component->setActive(false);
+                    isActive.store(false, std::memory_order_release);
+                }
+                setupProcessing();
+                if (component && component->setActive(true) == kResultOk)
+                    isActive.store(true, std::memory_order_release);
+                updateParameters();
+                (void)sr; (void)bs;
+            }
+            // kParamValuesChanged: refresh parameter cache only.
+            if (componentHandler->pendingParamRefresh.exchange(false, std::memory_order_acq_rel)) {
+                updateParameters();
+            }
+        }
+
+#ifdef __linux__
+        if (plugFrame) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64 currentTimeMs = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            plugFrame->processEvents(currentTimeMs);
+        }
+#endif
+#ifdef __APPLE__
+        OwnVst3_ProcessIdleMacOS();
+#endif
+    }
+
+    bool isEditorOpen() const { return view != nullptr; }
+
+    int getActualInputChannels()  const { return actualInputChannels; }
+    int getActualOutputChannels() const { return actualOutputChannels; }
+
+    void setTempo(double bpm)           { currentBpm.store(bpm, std::memory_order_relaxed); }
+    void setTransportState(bool playing){ isTransportPlaying.store(playing, std::memory_order_relaxed); }
+    void resetTransportPosition()       { currentSamplePos.store(0.0, std::memory_order_relaxed); }
+
+private:
+    bool findComponentAndControllerIDs(IPluginFactory* factory, FUID& componentID,
+                                        FUID& controllerID, std::string& componentName) {
+        bool foundComponent = false;
+        PClassInfo classInfo;
+
+        for (int32 i = 0; i < factory->countClasses(); i++) {
+            if (factory->getClassInfo(i, &classInfo) != kResultOk) continue;
+            if (strcmp(classInfo.category, kVstAudioEffectClass) != 0) continue;
+
+            componentID   = FUID(classInfo.cid);
+            componentName = classInfo.name;
+            foundComponent = true;
+
+            // Create a temporary component instance solely to retrieve the
+            // controller class ID. Call initialize() before getControllerClassId()
+            // and terminate() afterward to comply with the VST3 spec – calling
+            // terminate() without initialize() is undefined behaviour and crashes
+            // some plugins.
+            FUnknownPtr<IComponent> tempComponent;
+            if (factory->createInstance(componentID, IComponent::iid, (void**)&tempComponent) == kResultOk
+                && tempComponent) {
+                if (tempComponent->initialize(&hostApp) == kResultOk) {
+                    TUID _ctrID;
+                    if (tempComponent->getControllerClassId(_ctrID) == kResultOk) {
+                        FUID ctrID(_ctrID);
+                        if (ctrID.isValid())
+                            controllerID = ctrID;
+                    }
+                    tempComponent->terminate();
+                }
+            }
+            break;
+        }
+        return foundComponent;
+    }
+
+    void connectComponentAndController() {
+        if (!component || !controller) return;
+        FUnknownPtr<IConnectionPoint> componentCP(component);
+        FUnknownPtr<IConnectionPoint> controllerCP(controller);
+        if (componentCP && controllerCP) {
+            componentCP->connect(controllerCP);
+            controllerCP->connect(componentCP);
+        }
+    }
+
+    // hostApp MUST be first: constructed before and destructed after all VST3 objects.
+    Steinberg::Vst::HostApplication hostApp;
+
+    VST3::Hosting::Module::Ptr module   = nullptr;
+    IPluginFactory*  factory            = nullptr;
+    IComponent*      component          = nullptr;
+    IEditController* controller         = nullptr;
+    IAudioProcessor* processor          = nullptr;
+    IPlugView*       view               = nullptr;
+    PlugFrame*       plugFrame          = nullptr;
+
+    std::vector<Vst3Parameter> parameters;
+    double sampleRate;
+    int    blockSize;
+
+    OwnComponentHandler* componentHandler = nullptr;
+
+    // Atomic flag – written by UI thread (initialize, loadPlugin) and read by
+    // audio thread (processAudio). Must be atomic to avoid undefined behaviour.
+    std::atomic<bool> isActive{false};
+
+    int numInputBuses        = 1;
+    int numOutputBuses       = 1;
+    int numEventInputBuses   = 0;
+    int actualInputChannels  = 2;
+    int actualOutputChannels = 2;
+
+    Steinberg::uint32 processContextRequirements = 0;
+
+    // Pre-allocated bus buffer arrays – sized in setupProcessing(), reused each callback.
+    std::vector<AudioBusBuffers> inBusBuffers;
+    std::vector<AudioBusBuffers> outBusBuffers;
+
+    // Silent stereo buffer for secondary (sidechain/aux) buses.
+    // Provides valid non-null pointers for deactivated buses as a safety guard.
+    std::vector<float> silentBuffer;
+    float* silentChannelPtrs[2] = {nullptr, nullptr};
+
+    // Pre-allocated parameter change queues – clearQueue() resets without freeing.
+    ParameterChanges inputParamChanges;
+    ParameterChanges outputParamChanges;
+
+    // Lock-free SPSC queue: UI thread pushes, audio thread pops.
+    // No hash collision possible (unlike the previous direct-mapped cache).
+    ParamChangeSPSC paramQueue;
+
+    // Lock-free SPSC queue for MIDI events: UI/MIDI thread pushes, audio thread pops.
+    // Events are converted to VST3 Event structs and passed via data.inputEvents
+    // in processAudio(), ensuring a single process() call per block (VST3 spec).
+    MidiEventSPSC midiQueue;
+
+    // Scratch buffer for draining midiQueue on the audio thread – stack-sized,
+    // no heap allocation.
+    QueuedMidiEvent midiScratch[MIDI_QUEUE_CAPACITY];
+
+    // Pre-allocated EventList for passing MIDI events to the plugin.
+    // setMaxSize() is called in setupProcessing(); clear() only resets fillCount.
+    EventList preAllocEventList;
+
+    // Mutex protecting lastSetValues – never held on the audio thread.
+    std::mutex paramMutex;
+
+    // Mutex held by processAudio() for the duration of each process() call.
+    // getState() acquires it (blocking) before the parameter-flush process()
+    // call so the two process() invocations never execute concurrently.
+    // processAudio() uses try_to_lock so it never blocks the audio thread:
+    // if getState() holds the lock, processAudio() skips the block silently.
+    std::mutex audioProcessMutex;
+
+    // Last value set by the host for each parameter ID.
+    // getParameter() reads this instead of controller->getParamNormalized() to
+    // avoid acquiring the plugin's internal mutex from the UI thread while the
+    // audio thread may be inside process() holding the same mutex.
+    std::unordered_map<uint32_t, double> lastSetValues;
+
+    // Per-pitch noteId tracking. processMidi() may be called from any thread
+    // (UI, MIDI callback), so each slot is atomic to prevent data races.
+    // Assigns a unique, monotonically increasing ID to each NoteOn so the
+    // matching NoteOff can reference the same voice. Prevents hanging notes.
+    std::atomic<int32_t> nextNoteId{0};
+    std::array<std::atomic<int32_t>, 128> activeNoteIds; // index = MIDI pitch
+
+    // Transport state – written by UI thread, read by audio thread.
+    std::atomic<double> currentBpm{120.0};
+    std::atomic<double> currentSamplePos{0.0};
+    std::atomic<bool>   isTransportPlaying{false};
+
+#ifdef __APPLE__
+    CFRunLoopTimerRef idleTimer     = nullptr;
+    void*             editorNSViewHandle = nullptr;
+#endif
+
+#ifdef _WIN32
+    std::string tchar_to_utf8(const Steinberg::Vst::TChar* tcharStr) {
+        std::string result;
+        if (!tcharStr) return result;
+        std::wstring wstr(reinterpret_cast<const wchar_t*>(tcharStr));
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
+        if (size_needed > 0) {
+            result.resize(size_needed);
+            WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &result[0], size_needed, NULL, NULL);
+        }
+        return result;
+    }
+#else
+    std::string tchar_to_utf8(const Steinberg::Vst::TChar* tcharStr) {
+        std::string result;
+        if (!tcharStr) return result;
+        std::wstring wstr(reinterpret_cast<const wchar_t*>(tcharStr));
+        try {
+            std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+            result = converter.to_bytes(wstr);
+        } catch (...) {
+            for (wchar_t ch : wstr)
+                result.push_back(ch <= 127 ? static_cast<char>(ch) : '?');
+        }
+        return result;
+    }
+#endif
+};
+
+
+Vst3Plugin::Vst3Plugin() : impl(new Vst3PluginImpl()) {}
+Vst3Plugin::~Vst3Plugin() {}
+
+// OwnComponentHandler::performEdit – implemented here because it calls back
+// into Vst3PluginImpl::setParameter which is defined above this point.
+// This routes editor-driven parameter changes (knob/slider moves in the
+// plugin UI) through the same path as host-initiated parameter sets:
+//   1. Updates the lastSetValues cache (for correct getParameter reads).
+//   2. Calls controller->setParamNormalized (keeps UI in sync).
+//   3. Enqueues the change into the lock-free SPSC paramQueue so the
+//      audio thread picks it up before the next process() block.
+Steinberg::tresult PLUGIN_API OwnComponentHandler::performEdit(
+        Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue valueNormalized) {
+    if (pluginImpl)
+        pluginImpl->setParameter(static_cast<int>(id), valueNormalized);
+    return Steinberg::kResultOk;
+}
+
+// kParamValuesChanged  → deferred updateParameters() via processIdle() (UI-thread safe).
+// kIoChanged / kReloadComponent → deferred reinitialize() via processIdle().
+// Deferring avoids crashes from T-Racks 6 calling restartComponent on a plugin-internal
+// background thread while AppKit or VST3 objects are active on the main thread.
+Steinberg::tresult PLUGIN_API OwnComponentHandler::restartComponent(Steinberg::int32 flags) {
+    if (flags & Steinberg::Vst::kParamValuesChanged)
+        scheduleParameterRefresh();
+    if (flags & (Steinberg::Vst::kIoChanged | Steinberg::Vst::kReloadComponent))
+        scheduleIoRestart();
+    return Steinberg::kResultOk;
+}
+
+bool        Vst3Plugin::loadPlugin(const std::string& p)         { return impl->loadPlugin(p); }
+bool        Vst3Plugin::createEditor(void* h)                    { return impl->createEditor(h); }
+void        Vst3Plugin::closeEditor()                            { impl->closeEditor(); }
+void        Vst3Plugin::resizeEditor(int w, int h)               { impl->resizeEditor(w, h); }
+bool        Vst3Plugin::getEditorSize(int& w, int& h)            { return impl->getEditorSize(w, h); }
+std::vector<Vst3Parameter> Vst3Plugin::getParameters()           { return impl->getParameters(); }
+int         Vst3Plugin::getParameterCount()                      { return impl->getParameterCount(); }
+bool        Vst3Plugin::getParameterInfo(int i, Vst3Parameter& p){ return impl->getParameterInfo(i, p); }
+bool        Vst3Plugin::setParameter(int id, double v)           { return impl->setParameter(id, v); }
+double      Vst3Plugin::getParameter(int id)                     { return impl->getParameter(id); }
+bool        Vst3Plugin::initialize(double sr, int bs)            { return impl->initialize(sr, bs); }
+bool        Vst3Plugin::processAudio(AudioBuffer& b)             { return impl->processAudio(b); }
+bool        Vst3Plugin::processMidi(const MidiEvent* events, int count) { return impl->processMidi(events, count); }
+bool        Vst3Plugin::isInstrument()                           { return impl->isInstrument(); }
+bool        Vst3Plugin::isEffect()                               { return impl->isEffect(); }
+bool        Vst3Plugin::isMidiOnly()                             { return impl->isMidiOnly(); }
+std::string Vst3Plugin::getName()                                { return impl->getName(); }
+std::string Vst3Plugin::getVendor()                              { return impl->getVendor(); }
+std::string Vst3Plugin::getVersion()                             { return impl->getVersion(); }
+std::string Vst3Plugin::getPluginInfo()                          { return impl->getPluginInfo(); }
+void        Vst3Plugin::processIdle()                            { impl->processIdle(); }
+bool        Vst3Plugin::isEditorOpen()                           { return impl->isEditorOpen(); }
+int         Vst3Plugin::getActualInputChannels()                 { return impl->getActualInputChannels(); }
+int         Vst3Plugin::getActualOutputChannels()                { return impl->getActualOutputChannels(); }
+void        Vst3Plugin::setTempo(double bpm)                     { impl->setTempo(bpm); }
+void        Vst3Plugin::setTransportState(bool p)                { impl->setTransportState(p); }
+void        Vst3Plugin::resetTransportPosition()                 { impl->resetTransportPosition(); }
+bool        Vst3Plugin::getState(uint8_t** d, int* l)            { return impl->getState(d, l); }
+bool        Vst3Plugin::setState(const uint8_t* d, int l)        { return impl->setState(d, l); }
+void        Vst3Plugin::freeStateData(uint8_t* d)                { Vst3PluginImpl::freeStateData(d); }
+
+} // namespace OwnVst3Host
